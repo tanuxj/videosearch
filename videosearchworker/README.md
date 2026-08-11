@@ -79,6 +79,30 @@ curl -H "Range: bytes=0-1023" "<url-printed-above>"
 # expect 206 + Content-Range + the first 1 KB
 ```
 
+## Check a deployed Worker
+
+From the backend, which signs with the same secret:
+
+```bash
+cd ../videosearchbackend
+uv run python scripts/check_stream_worker.py
+```
+
+It verifies signature enforcement, that the shared secret matches, that the R2
+binding resolves, and that Range requests seek — then prints a pass/fail list.
+
+Reading responses by hand:
+
+| Response to a **correctly signed** URL | Meaning |
+| -------------------------------------- | ------- |
+| `200` / `206` | Working. |
+| `404 Not found` | Secret matches and R2 was reached — that object key just isn't in the bucket. |
+| `403 Forbidden` (9-byte body) | The Worker rejected the signature: its `STREAM_SIGN_SECRET` differs from the backend's `STREAM_SIGNING_SECRET`, or the URL expired. |
+| `403 error code: 1010` | **Not the Worker.** Cloudflare's browser-integrity check blocked the client at the edge because of its User-Agent. Default `python-urllib`, and some scripted clients, trip this — send a normal `User-Agent`. |
+
+That last row is the trap: it looks identical to a signature failure but never
+reaches your code. `curl` is unaffected; a bare `urllib.request.urlopen()` is not.
+
 ## Files
 
 ```
