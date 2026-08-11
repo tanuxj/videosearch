@@ -1,0 +1,70 @@
+# ─────────────────────────────────────────────────────────────
+# VideoSearch backend + Postgres development stack
+#
+# Usage:
+#   docker compose up --build     # build API image + start Postgres
+#   docker compose up -d          # run detached
+#   docker compose down           # stop (keeps the DB volume)
+#   docker compose down -v        # stop and delete the DB volume
+#
+# Credentials are read from the sibling .env file (POSTGRES_* vars).
+# ─────────────────────────────────────────────────────────────
+
+services:
+  db:
+    # Official pgvector image = Postgres 16 + the `vector` extension.
+    # Version pinned for reproducibility (matches project convention).
+    image: pgvector/pgvector:0.8.2-pg16
+    container_name: videosearch-db
+    restart: unless-stopped
+    command: ["postgres", "-c", "shared_preload_libraries=vector"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-videosearch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-videosearch}
+      POSTGRES_DB: ${POSTGRES_DB:-videosearch}
+    ports:
+      # Host port comes from POSTGRES_PORT in .env — set it to e.g. 5433
+      # if your machine already runs Postgres on 5432.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Runs `CREATE EXTENSION IF NOT EXISTS vector;` on first boot only.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-videosearch} -d ${POSTGRES_DB:-videosearch}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: videosearch-backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: development
+      HOST: 0.0.0.0
+      PORT: 3006
+      # Inside the compose network the DB host is the service name "db".
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:5174,http://127.0.0.1:5174}"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-videosearch}
+      POSTGRES_USER: ${POSTGRES_USER:-videosearch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-videosearch}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-videosearch}:${POSTGRES_PASSWORD:-videosearch}@db:5432/${POSTGRES_DB:-videosearch}
+    ports:
+      - "${PORT:-3006}:3006"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

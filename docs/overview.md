@@ -27,12 +27,10 @@ Runs asynchronously per uploaded video:
 
 1. **Scene detection** — `PySceneDetect` splits the video into shots/scenes
    based on visual cuts, giving rough time boundaries.
-2. **Transcription** — `faster-whisper` (or OpenAI Whisper) transcribes the
-   audio with word/segment-level timestamps.
-3. **Visual embeddings** — extract 1–2 keyframes per scene and embed them
+2. **Visual embeddings** — extract 1–2 keyframes per scene and embed them
    with CLIP, so visual concepts ("a red car," "person running") are
    searchable even if nobody says those words aloud.
-4. **Fuse** — merge transcript segments and scene boundaries into "chunks,"
+3. **Fuse** — merge transcript segments and scene boundaries into "chunks,"
    each with `start_time`, `end_time`, transcript text, and a visual +
    text embedding.
 

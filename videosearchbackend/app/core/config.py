@@ -42,6 +42,16 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # ── Postgres database (spawned by docker-compose) ────────────
+    # The compose stack passes these to the container; when running the
+    # app locally they default to the same dev values.
+    database_url: str = "postgresql://videosearch:videosearch@localhost:5432/videosearch"
+    postgres_host: str = "localhost"
+    postgres_port: int = Field(default=5432, ge=1, le=65535)
+    postgres_db: str = "videosearch"
+    postgres_user: str = "videosearch"
+    postgres_password: str = "videosearch"
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_comma_separated(cls, value: object) -> object:

@@ -49,6 +49,12 @@ Settings are loaded from `.env` (see `.env.example`) via pydantic-settings in
 | `PORT`          | `3006`                                      | Bind port (used by `videosearch-api`)    |
 | `CORS_ORIGINS`  | `["http://localhost:5174","http://127.0.0.1:5174"]` | Browser origins allowed to call the API |
 | `LOG_LEVEL`     | `INFO`                                      | Root log level                |
+| `DATABASE_URL`  | `postgresql://videosearch:videosearch@localhost:5432/videosearch` | Postgres connection string |
+| `POSTGRES_HOST` | `localhost`                                 | Postgres host (set to `db` inside docker-compose) |
+| `POSTGRES_PORT` | `5432`                                      | Postgres port                |
+| `POSTGRES_DB`   | `videosearch`                               | Postgres database name       |
+| `POSTGRES_USER` | `videosearch`                               | Postgres user                |
+| `POSTGRES_PASSWORD` | `videosearch`                          | Postgres password (override in `.env`!) |
 
 > `CORS_ORIGINS` already allows the Vite frontend (port 5174) — no extra setup
 > needed to call this API from the browser.
@@ -72,6 +78,34 @@ tests/
 ```
 
 ## Docker
+
+### Full stack (API + Postgres with pgvector) via docker compose
+
+```bash
+docker compose up --build    # starts Postgres + the API on :3006
+```
+
+The DB uses the official **pgvector** image (`pgvector/pgvector:pg16`) — plain
+Postgres 16 plus the `vector` extension for semantic search. The extension is
+enabled automatically on first boot by `db/init/01-vector.sql`
+(`CREATE EXTENSION IF NOT EXISTS vector;`).
+
+Credentials come from `.env` (`POSTGRES_*` vars); the DB data is persisted in
+the `postgres_data` volume. Stop with `docker compose down` (add `-v` to also
+wipe the database).
+
+> ℹ️ This project maps the DB to host port **5433** (`POSTGRES_PORT` in `.env`)
+> to avoid clashing with another Postgres already running on 5432.
+
+> ⚠️ Init scripts only run when the data volume is empty. If you previously
+> started the old plain-Postgres image, run `docker compose down -v` once so the
+> pgvector image can initialize a fresh volume with the extension enabled.
+
+> ⚠️ Init scripts only run when the data volume is empty. If you previously
+> started the old plain-Postgres image, run `docker compose down -v` once so the
+> pgvector image can initialize a fresh volume with the extension enabled.
+
+### API image only
 
 ```bash
 docker build -t videosearchbackend .
