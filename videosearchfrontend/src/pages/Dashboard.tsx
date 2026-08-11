@@ -1,7 +1,9 @@
-import { Link, useNavigate } from '../lib/router'
+import { useState } from 'react'
+import { useNavigate } from '../lib/router'
 import { useAuth } from '../lib/auth'
 import { removeVideo, sourceFor, useVideos } from '../lib/store'
 import { AppShell } from '../components/Shell'
+import { UploadDialog } from '../components/UploadDialog'
 import {
   ClockIcon,
   FilmIcon,
@@ -22,9 +24,11 @@ export default function Dashboard() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const videos = useVideos(user?.id)
+  const [uploadOpen, setUploadOpen] = useState(false)
 
   const totalFrames = videos.reduce((sum, video) => sum + video.frames, 0)
   const totalSeconds = videos.reduce((sum, video) => sum + video.duration, 0)
+  const totalBytes = videos.reduce((sum, video) => sum + video.sizeBytes, 0)
   const ready = videos.filter((video) => video.status === 'ready').length
 
   const firstName = user?.name.split(' ')[0] ?? 'there'
@@ -32,17 +36,25 @@ export default function Dashboard() {
   return (
     <AppShell
       title={`Welcome back, ${firstName}`}
-      subtitle="Your indexed library at a glance."
+      subtitle="Everything you've indexed, ready to search."
       actions={
         <>
-          <Link to="/search" className="btn btn-ghost btn-sm">
-            <SearchIcon />
-            Search clips
-          </Link>
-          <Link to="/upload" className="btn btn-primary btn-sm">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => setUploadOpen(true)}
+          >
             <UploadIcon />
-            Upload video
-          </Link>
+            Add video
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => navigate('/search')}
+          >
+            <SearchIcon />
+            Find a scene
+          </button>
         </>
       }
     >
@@ -76,9 +88,7 @@ export default function Dashboard() {
             <SearchIcon />
             Storage
           </span>
-          <b>
-            {fileSize(videos.reduce((sum, video) => sum + video.sizeBytes, 0))}
-          </b>
+          <b>{fileSize(totalBytes)}</b>
           <span>across your workspace</span>
         </div>
       </div>
@@ -87,13 +97,17 @@ export default function Dashboard() {
         <div className="panel-head">
           <div>
             <h2>Your videos</h2>
-            <p>Pick one to search, or upload something new.</p>
+            <p>Pick one to search, or add something new.</p>
           </div>
           <div className="panel-head-actions">
-            <Link to="/upload" className="btn btn-ghost btn-sm">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => setUploadOpen(true)}
+            >
               <UploadIcon />
-              Upload
-            </Link>
+              Add video
+            </button>
           </div>
         </div>
 
@@ -104,75 +118,77 @@ export default function Dashboard() {
             </span>
             <h3>No videos yet</h3>
             <p>
-              Upload your first video and we’ll index every frame so you can
-              search it by description.
+              Add your first video and we’ll index every frame so you can search
+              it by description.
             </p>
-            <Link to="/upload" className="btn btn-primary">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => setUploadOpen(true)}
+            >
               <UploadIcon />
-              Upload a video
-            </Link>
+              Add a video
+            </button>
           </div>
         ) : (
-          videos.map((video) => {
-            const attached = Boolean(sourceFor(video.id))
-            return (
-              <article key={video.id} className="lib-row">
-                <span className="lib-thumb">
-                  {video.poster ? (
-                    <img src={video.poster} alt="" />
-                  ) : (
-                    <PlayIcon />
-                  )}
+          videos.map((video) => (
+            <article key={video.id} className="lib-row">
+              <span className="lib-thumb">
+                {video.poster ? <img src={video.poster} alt="" /> : <PlayIcon />}
+              </span>
+              <div className="lib-meta">
+                <b>{video.name}</b>
+                <span>
+                  {humanDuration(video.duration)} ·{' '}
+                  {compactNumber(video.frames)} frames ·{' '}
+                  {fileSize(video.sizeBytes)} · {relativeTime(video.createdAt)}
                 </span>
-                <div className="lib-meta">
-                  <b>{video.name}</b>
-                  <span>
-                    {humanDuration(video.duration)} ·{' '}
-                    {compactNumber(video.frames)} frames ·{' '}
-                    {fileSize(video.sizeBytes)} ·{' '}
-                    {relativeTime(video.createdAt)}
+              </div>
+              <div className="lib-actions">
+                {video.status === 'ready' ? (
+                  <span className="chip chip-ok">Indexed</span>
+                ) : (
+                  <span className="chip chip-warn">Processing</span>
+                )}
+                {!sourceFor(video.id) && (
+                  <span
+                    className="chip"
+                    title="The file handle was lost when the tab reloaded — re-attach it on the search page to play clips back."
+                  >
+                    Playback offline
                   </span>
-                </div>
-                <div className="lib-actions">
-                  {video.status === 'ready' ? (
-                    <span className="chip chip-ok">Indexed</span>
-                  ) : (
-                    <span className="chip chip-warn">Processing</span>
-                  )}
-                  {!attached && (
-                    <span
-                      className="chip"
-                      title="The file handle was lost when the tab reloaded — re-upload to play it back."
-                    >
-                      Playback offline
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => navigate(`/search?v=${video.id}`)}
-                  >
-                    <SearchIcon />
-                    Search
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-quiet btn-sm"
-                    aria-label={`Delete ${video.name}`}
-                    onClick={() => {
-                      if (!user) return
-                      if (confirm(`Delete “${video.name}” and its frame index?`))
-                        removeVideo(user.id, video.id)
-                    }}
-                  >
-                    <TrashIcon />
-                  </button>
-                </div>
-              </article>
-            )
-          })
+                )}
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => navigate(`/search?v=${video.id}`)}
+                >
+                  <SearchIcon />
+                  Search
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-quiet btn-sm"
+                  aria-label={`Delete ${video.name}`}
+                  onClick={() => {
+                    if (!user) return
+                    if (confirm(`Delete “${video.name}” and its frame index?`))
+                      removeVideo(user.id, video.id)
+                  }}
+                >
+                  <TrashIcon />
+                </button>
+              </div>
+            </article>
+          ))
         )}
       </section>
+
+      <UploadDialog
+        open={uploadOpen}
+        onClose={() => setUploadOpen(false)}
+        onReady={(video) => navigate(`/search?v=${video.id}`)}
+      />
     </AppShell>
   )
 }

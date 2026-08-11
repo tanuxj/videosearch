@@ -1,22 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
-import { Link, useNavigate } from '../lib/router'
 import { useAuth } from '../lib/auth'
 import {
   attachSource,
   captureFrames,
   readVideoDuration,
   saveVideo,
-  sourceFor,
 } from '../lib/store'
 import type { VideoRecord } from '../lib/store'
-import { AppShell } from '../components/Shell'
-import {
-  CheckIcon,
-  PlayIcon,
-  SearchIcon,
-  UploadIcon,
-} from '../components/Icons'
+import { Modal } from './Modal'
+import { CheckIcon, PlayIcon, SearchIcon, UploadIcon } from './Icons'
 import { compactNumber, fileSize, humanDuration } from '../lib/format'
 
 const STAGES = [
@@ -28,9 +21,15 @@ const STAGES = [
 
 const MAX_BYTES = 512 * 1024 * 1024
 
-export default function Upload() {
+type Props = {
+  open: boolean
+  onClose: () => void
+  /** Called with the finished video when the user chooses to search it. */
+  onReady?: (video: VideoRecord) => void
+}
+
+export function UploadDialog({ open, onClose, onReady }: Props) {
   const { user } = useAuth()
-  const navigate = useNavigate()
   const inputRef = useRef<HTMLInputElement>(null)
   const aliveRef = useRef(true)
 
@@ -47,6 +46,19 @@ export default function Upload() {
       aliveRef.current = false
     }
   }, [])
+
+  // Reset for the next upload once the dialog is fully closed.
+  useEffect(() => {
+    if (open) return
+    const timer = setTimeout(() => {
+      setVideo(null)
+      setProgress(0)
+      setStage(0)
+      setDone(false)
+      setError('')
+    }, 200)
+    return () => clearTimeout(timer)
+  }, [open])
 
   async function ingest(file: File) {
     if (!user) return
@@ -90,8 +102,8 @@ export default function Upload() {
     setVideo(withPoster)
     saveVideo(user.id, withPoster)
 
-    // Walk the indexing stages. Real work happens server-side; the client just
-    // reports where the pipeline is.
+    // Walk the indexing stages. The heavy lifting is server-side; the client
+    // just reports where the pipeline is.
     for (let index = 0; index < STAGES.length; index += 1) {
       if (!aliveRef.current) return
       setStage(index)
@@ -118,26 +130,21 @@ export default function Upload() {
     if (file) void ingest(file)
   }
 
-  const busy = Boolean(video) && !done
-
   return (
-    <AppShell
-      title="Upload a video"
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Add a video"
       subtitle="Frames are extracted once per second and embedded with CLIP."
-      actions={
-        <Link to="/dashboard" className="btn btn-ghost btn-sm">
-          Back to dashboard
-        </Link>
-      }
     >
-      <div className="page-narrow">
+      <div className="modal-body">
         {error && (
-          <p className="alert" role="alert" style={{ marginBottom: 16 }}>
+          <p className="alert" style={{ marginBottom: 14 }} role="alert">
             {error}
           </p>
         )}
 
-        {!video && (
+        {!video ? (
           <div
             className={`dropzone${dragging ? ' is-over' : ''}`}
             onDragOver={(event) => {
@@ -150,14 +157,14 @@ export default function Upload() {
             <span className="dropzone-icon">
               <UploadIcon />
             </span>
-            <h2>Drop your video here</h2>
+            <h3>Drop your video here</h3>
             <p>
-              Or pick a file from your machine. Indexing starts as soon as the
-              file lands — a ten-minute clip takes about a minute.
+              Indexing starts the moment the file lands — a ten-minute clip takes
+              about a minute.
             </p>
             <button
               type="button"
-              className="btn btn-primary btn-lg"
+              className="btn btn-primary"
               onClick={() => inputRef.current?.click()}
             >
               <UploadIcon />
@@ -178,10 +185,8 @@ export default function Upload() {
               }}
             />
           </div>
-        )}
-
-        {video && (
-          <section className="panel" style={{ marginTop: 0 }}>
+        ) : (
+          <>
             <div className="upload-card">
               <span className="lib-thumb">
                 {video.poster ? <img src={video.poster} alt="" /> : <PlayIcon />}
@@ -202,69 +207,71 @@ export default function Upload() {
               </span>
             </div>
 
-            <div style={{ padding: '0 18px 18px' }}>
-              <div className="stage-list">
-                {STAGES.map((item, index) => {
-                  const state =
-                    done || index < stage
-                      ? 'is-done'
-                      : index === stage
-                        ? 'is-active'
-                        : ''
-                  return (
-                    <div key={item.label} className={`stage ${state}`}>
-                      <span className="stage-dot">
-                        {(done || index < stage) && <CheckIcon />}
+            <div className="stage-list">
+              {STAGES.map((item, index) => {
+                const state =
+                  done || index < stage
+                    ? 'is-done'
+                    : index === stage
+                      ? 'is-active'
+                      : ''
+                return (
+                  <div key={item.label} className={`stage ${state}`}>
+                    <span className="stage-dot">
+                      {(done || index < stage) && <CheckIcon />}
+                    </span>
+                    {item.label}
+                    {index === 1 && (
+                      <span className="stage-count">
+                        {compactNumber(video.frames)} frames
                       </span>
-                      {item.label}
-                      {index === 1 && (
-                        <span className="stage-count">
-                          {compactNumber(video.frames)} frames
-                        </span>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-
-              <div
-                style={{
-                  display: 'flex',
-                  gap: 10,
-                  marginTop: 18,
-                  flexWrap: 'wrap',
-                }}
-              >
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={!done}
-                  onClick={() => navigate(`/search?v=${video.id}`)}
-                >
-                  <SearchIcon />
-                  {done ? 'Search this video' : 'Indexing…'}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={busy}
-                  onClick={() => {
-                    setVideo(null)
-                    setProgress(0)
-                    setStage(0)
-                    setDone(false)
-                  }}
-                >
-                  Upload another
-                </button>
-                {!sourceFor(video.id) && (
-                  <span className="chip">Playback unavailable</span>
-                )}
-              </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
-          </section>
+          </>
         )}
       </div>
-    </AppShell>
+
+      {video && (
+        <footer className="modal-foot">
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={!done}
+            onClick={() => {
+              setVideo(null)
+              setProgress(0)
+              setStage(0)
+              setDone(false)
+            }}
+          >
+            Add another
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={!done}
+            onClick={() => {
+              if (video) onReady?.(video)
+              onClose()
+            }}
+          >
+            {done ? (
+              <>
+                <SearchIcon />
+                Search this video
+              </>
+            ) : (
+              <>
+                <span className="spinner" />
+                Indexing…
+              </>
+            )}
+          </button>
+        </footer>
+      )}
+    </Modal>
   )
 }

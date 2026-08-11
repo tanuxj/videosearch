@@ -1,13 +1,7 @@
 import type { ReactNode } from 'react'
 import { Link, useRoute } from '../lib/router'
 import { initials, useAuth } from '../lib/auth'
-import {
-  GridIcon,
-  PlayIcon,
-  SearchIcon,
-  SignOutIcon,
-  UploadIcon,
-} from './Icons'
+import { GridIcon, PlayIcon, SearchIcon, SignOutIcon } from './Icons'
 
 export const APP_NAME: string = import.meta.env.VITE_APP_NAME || 'VideoSearch'
 
@@ -39,8 +33,8 @@ export function MarketingShell({ children }: { children: ReactNode }) {
           </nav>
           <div className="top-nav-actions">
             {user ? (
-              <Link to="/dashboard" className="btn btn-primary btn-sm">
-                Open dashboard
+              <Link to="/search" className="btn btn-primary btn-sm">
+                Open workspace
               </Link>
             ) : (
               <>
@@ -76,10 +70,11 @@ export function MarketingShell({ children }: { children: ReactNode }) {
 
 /* ── Authenticated app ──────────────────────────────────── */
 
+// Upload isn't a page any more — it's a dialog you can open from anywhere,
+// so the workspace is just "find a scene" and "the library you search over".
 const NAV = [
-  { to: '/dashboard', label: 'Dashboard', icon: GridIcon },
-  { to: '/upload', label: 'Upload', icon: UploadIcon },
-  { to: '/search', label: 'Search clips', icon: SearchIcon },
+  { to: '/search', label: 'Find a scene', icon: SearchIcon },
+  { to: '/dashboard', label: 'Library', icon: GridIcon },
 ]
 
 type AppShellProps = {

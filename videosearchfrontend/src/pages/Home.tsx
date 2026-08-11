@@ -67,8 +67,8 @@ const PREVIEW_ROWS = [
 
 export default function Home() {
   const { user } = useAuth()
-  const primaryHref = user ? '/dashboard' : '/signup'
-  const primaryLabel = user ? 'Open your dashboard' : 'Start free'
+  const primaryHref = user ? '/search' : '/signup'
+  const primaryLabel = user ? 'Open your workspace' : 'Start free'
 
   return (
     <MarketingShell>

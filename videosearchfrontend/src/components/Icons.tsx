@@ -121,6 +121,30 @@ export const SignOutIcon = () => (
   </Stroke>
 )
 
+export const CloseIcon = () => (
+  <Stroke>
+    <path d="M6 6l12 12M18 6L6 18" />
+  </Stroke>
+)
+
+export const ChevronIcon = () => (
+  <Stroke>
+    <path d="M7 10l5 5 5-5" />
+  </Stroke>
+)
+
+export const ArrowLeftIcon = () => (
+  <Stroke>
+    <path d="M20 12H4M9.5 6.5L4 12l5.5 5.5" />
+  </Stroke>
+)
+
+export const ArrowRightIcon = () => (
+  <Stroke>
+    <path d="M4 12h16M14.5 6.5L20 12l-5.5 5.5" />
+  </Stroke>
+)
+
 export const TrashIcon = () => (
   <Stroke>
     <path d="M4.5 7h15M9.5 7V5.5A1.5 1.5 0 0111 4h2a1.5 1.5 0 011.5 1.5V7" />

@@ -6,7 +6,6 @@ import Home from './pages/Home'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
-import Upload from './pages/Upload'
 import Search from './pages/Search'
 
 const PROTECTED = new Set(['/dashboard', '/upload', '/search'])
@@ -42,6 +41,8 @@ function Routes() {
     if (!ready) return
     if (!user && PROTECTED.has(route)) navigate('/login', true)
     if (user && AUTH_ONLY.has(route)) navigate('/dashboard', true)
+    // Upload is a dialog now — keep the old link working.
+    if (user && route === '/upload') navigate('/search?upload=1', true)
   }, [ready, user, route, navigate])
 
   // Hold the first paint until the stored session is known — otherwise
@@ -59,10 +60,10 @@ function Routes() {
       return <Signup />
     case '/dashboard':
       return <Dashboard />
-    case '/upload':
-      return <Upload />
     case '/search':
       return <Search />
+    case '/upload':
+      return null // redirected above
     default:
       return <NotFound />
   }

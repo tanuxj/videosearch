@@ -1,20 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import { Link, useLocation } from '../lib/router'
+import { useLocation } from '../lib/router'
 import { useAuth } from '../lib/auth'
 import { attachSource, captureFrames, sourceFor, useVideos } from '../lib/store'
 import type { VideoRecord } from '../lib/store'
 import { SUGGESTIONS, searchClips } from '../lib/api'
 import type { Clip } from '../lib/api'
 import { AppShell } from '../components/Shell'
-import {
-  FilmIcon,
-  PlayIcon,
-  SearchIcon,
-  SparkIcon,
-  UploadIcon,
-} from '../components/Icons'
-import { humanDuration, timecode } from '../lib/format'
+import { VideoSelect } from '../components/VideoSelect'
+import { UploadDialog } from '../components/UploadDialog'
+import { ClipLightbox } from '../components/ClipLightbox'
+import { PlayIcon, SearchIcon, SparkIcon, UploadIcon } from '../components/Icons'
+import { timecode } from '../lib/format'
 
 export default function Search() {
   const { user } = useAuth()
@@ -25,18 +22,19 @@ export default function Search() {
   const [prompt, setPrompt] = useState('')
   const [clips, setClips] = useState<Clip[] | null>(null)
   const [thumbs, setThumbs] = useState<Map<number, string>>(new Map())
-  const [activeClip, setActiveClip] = useState<string | null>(null)
+  const [openClip, setOpenClip] = useState<Clip | null>(null)
   const [searching, setSearching] = useState(false)
   const [meta, setMeta] = useState<{ source: string; tookMs: number } | null>(
     null,
   )
   const [lastQuery, setLastQuery] = useState('')
-
-  const playerRef = useRef<HTMLVideoElement>(null)
-  const reattachRef = useRef<HTMLInputElement>(null)
-  /** Object URL for the selected video — only present if it was attached in
+  const [uploadOpen, setUploadOpen] = useState(query.get('upload') === '1')
+  /** Object URL for the selected video — only set if the file was attached in
    *  this tab session, so re-attaching updates it directly. */
   const [src, setSrc] = useState('')
+
+  const reattachRef = useRef<HTMLInputElement>(null)
+  const promptRef = useRef<HTMLTextAreaElement>(null)
 
   // Pick the video from ?v=, else the newest one in the library.
   useEffect(() => {
@@ -62,7 +60,7 @@ export default function Search() {
     setSrc(selectedId ? (sourceFor(selectedId) ?? '') : '')
     setClips(null)
     setThumbs(new Map())
-    setActiveClip(null)
+    setOpenClip(null)
     setMeta(null)
   }, [selectedId])
 
@@ -71,7 +69,7 @@ export default function Search() {
     if (!trimmed || !selected) return
 
     setSearching(true)
-    setActiveClip(null)
+    setOpenClip(null)
     setThumbs(new Map())
     setLastQuery(trimmed)
 
@@ -83,22 +81,13 @@ export default function Search() {
     // Real thumbnails, pulled from the file that's already in the browser.
     const source = sourceFor(selected.id)
     if (source && result.clips.length > 0) {
-      const frames = await captureFrames(
-        source,
-        result.clips.map((clip) => clip.frame),
+      setThumbs(
+        await captureFrames(
+          source,
+          result.clips.map((clip) => clip.frame),
+        ),
       )
-      setThumbs(frames)
     }
-  }
-
-  function playClip(clip: Clip) {
-    setActiveClip(clip.id)
-    const player = playerRef.current
-    if (!player || !src) return
-    player.currentTime = clip.start
-    void player.play().catch(() => {
-      /* autoplay blocked — the user can hit play */
-    })
   }
 
   function onPromptKey(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -108,292 +97,269 @@ export default function Search() {
     }
   }
 
-  if (videos.length === 0) {
-    return (
-      <AppShell
-        title="Search clips"
-        subtitle="Describe a scene and jump to the moment it happens."
-      >
-        <section className="panel" style={{ marginTop: 0 }}>
-          <div className="empty">
-            <span className="empty-icon">
-              <FilmIcon />
-            </span>
-            <h3>Nothing indexed yet</h3>
-            <p>
-              Upload a video first — once its frames are embedded you can search
-              it by description.
-            </p>
-            <Link to="/upload" className="btn btn-primary">
-              <UploadIcon />
-              Upload a video
-            </Link>
-          </div>
-        </section>
-      </AppShell>
-    )
-  }
+  const canSearch = Boolean(selected) && Boolean(prompt.trim()) && !searching
 
   return (
     <AppShell
-      title="Search clips"
-      subtitle="Describe a scene in plain language — results are ranked by visual similarity."
+      title="Find a scene"
+      subtitle="Pick an indexed video, describe the moment, and jump straight to it."
       actions={
-        <Link to="/upload" className="btn btn-ghost btn-sm">
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => setUploadOpen(true)}
+        >
           <UploadIcon />
-          Upload
-        </Link>
+          Add video
+        </button>
       }
     >
-      {videos.length > 1 && (
-        <div className="picker">
-          {videos.map((video) => (
-            <button
-              key={video.id}
-              type="button"
-              className={`picker-item${video.id === selectedId ? ' is-active' : ''}`}
-              onClick={() => setSelectedId(video.id)}
-            >
-              <span className="picker-dot">
-                <PlayIcon />
-              </span>
-              {video.name}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="search-layout">
-        <div>
-          <div className="prompt-bar">
-            <div className="prompt-input">
-              <textarea
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                onKeyDown={onPromptKey}
-                placeholder="e.g. a red car driving on a highway at sunset"
-                aria-label="Describe the scene you're looking for"
-              />
-              <button
-                type="button"
-                className="btn btn-primary"
-                style={{ height: 46 }}
-                disabled={searching || !prompt.trim()}
-                onClick={() => void runSearch(prompt)}
+      <div className="composer-wrap">
+        <div className="composer">
+          <div className="composer-top">
+            <VideoSelect
+              videos={videos}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onUpload={() => setUploadOpen(true)}
+            />
+            {selected && (
+              <span
+                className={`chip ${selected.status === 'ready' ? 'chip-ok' : 'chip-warn'}`}
               >
-                {searching ? <span className="spinner" /> : <SearchIcon />}
-                {searching ? 'Searching' : 'Search'}
-              </button>
+                {selected.status === 'ready' ? 'Indexed' : 'Indexing'}
+              </span>
+            )}
+          </div>
+
+          <textarea
+            ref={promptRef}
+            className="composer-input"
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={onPromptKey}
+            rows={3}
+            placeholder={
+              selected
+                ? 'Describe the scene — “a red car driving on a highway at sunset”'
+                : 'Add a video first, then describe the scene you want to find'
+            }
+            aria-label="Describe the scene you're looking for"
+          />
+
+          <div className="composer-foot">
+            <div className="composer-chips">
+              {selected &&
+                SUGGESTIONS.slice(0, 3).map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    className="suggest"
+                    onClick={() => {
+                      setPrompt(suggestion)
+                      void runSearch(suggestion)
+                    }}
+                  >
+                    <SparkIcon />
+                    {suggestion}
+                  </button>
+                ))}
             </div>
 
-            <div className="prompt-foot">
-              {SUGGESTIONS.slice(0, 3).map((suggestion) => (
+            <span className="composer-hint">⏎ to search</span>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={!canSearch}
+              onClick={() => void runSearch(prompt)}
+            >
+              {searching ? <span className="spinner" /> : <SearchIcon />}
+              {searching ? 'Searching' : 'Find clips'}
+            </button>
+          </div>
+        </div>
+
+        {selected && !src && (
+          <p className="composer-note">
+            Playback for this video isn’t attached to this tab — results still
+            rank, but you’ll need the file to watch them.
+            <button
+              type="button"
+              className="linkish"
+              onClick={() => reattachRef.current?.click()}
+            >
+              Re-attach file
+            </button>
+            <input
+              ref={reattachRef}
+              type="file"
+              accept="video/*"
+              className="sr-only"
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                if (file && selected) setSrc(attachSource(selected.id, file))
+                event.target.value = ''
+              }}
+            />
+          </p>
+        )}
+      </div>
+
+      {searching && (
+        <>
+          <div className="results-head">
+            <h2>Scanning indexed frames…</h2>
+          </div>
+          <div className="clip-grid">
+            {Array.from({ length: 8 }, (_, index) => (
+              <div key={index} className="skeleton" />
+            ))}
+          </div>
+        </>
+      )}
+
+      {!searching && clips && (
+        <>
+          <div className="results-head">
+            <h2>
+              {clips.length} {clips.length === 1 ? 'match' : 'matches'} for “
+              {lastQuery}”
+            </h2>
+            {meta && (
+              <span>
+                {meta.tookMs} ms ·{' '}
+                {meta.source === 'api'
+                  ? 'ranked by backend'
+                  : 'demo ranking (no backend configured)'}
+              </span>
+            )}
+          </div>
+
+          {clips.length === 0 ? (
+            <section className="panel" style={{ marginTop: 0 }}>
+              <div className="empty">
+                <span className="empty-icon">
+                  <SearchIcon />
+                </span>
+                <h3>No frames matched</h3>
+                <p>
+                  Try describing what’s visible in the shot — objects, setting,
+                  colours — rather than what’s said.
+                </p>
+              </div>
+            </section>
+          ) : (
+            <div className="clip-grid">
+              {clips.map((clip, index) => {
+                const thumb = thumbs.get(clip.frame)
+                return (
+                  <button
+                    key={clip.id}
+                    type="button"
+                    className="clip"
+                    style={{ animationDelay: `${index * 28}ms` }}
+                    onClick={() => setOpenClip(clip)}
+                  >
+                    <span className="clip-thumb">
+                      {thumb ? (
+                        <img src={thumb} alt="" />
+                      ) : (
+                        <span className="clip-thumb-fallback">
+                          <PlayIcon />
+                        </span>
+                      )}
+                      <span className="clip-rank">#{index + 1}</span>
+                      <span className="clip-play">
+                        <i>
+                          <PlayIcon />
+                        </i>
+                      </span>
+                      <span className="clip-time">
+                        {timecode(clip.start)} – {timecode(clip.end)}
+                      </span>
+                    </span>
+                    <span className="clip-body">
+                      <span className="clip-title">
+                        Frame at {timecode(clip.frame)}
+                      </span>
+                      <span className="clip-foot">
+                        <span className="match">
+                          <i
+                            style={{ width: `${Math.round(clip.score * 100)}%` }}
+                          />
+                        </span>
+                        <span className="match-val">
+                          {Math.round(clip.score * 100)}%
+                        </span>
+                      </span>
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {!searching && !clips && (
+        <div className="prompt-guide">
+          <div className="prompt-guide-head">
+            <h2>{selected ? 'Try describing…' : 'Start by adding a video'}</h2>
+            <p>
+              {selected
+                ? 'Matching runs on what the camera saw, so describe the visuals rather than the dialogue.'
+                : 'Once a video is indexed, every second of it becomes searchable by description.'}
+            </p>
+          </div>
+          {selected ? (
+            <div className="prompt-guide-grid">
+              {SUGGESTIONS.map((suggestion) => (
                 <button
                   key={suggestion}
                   type="button"
-                  className="suggest"
+                  className="prompt-card"
                   onClick={() => {
                     setPrompt(suggestion)
                     void runSearch(suggestion)
                   }}
                 >
-                  <SparkIcon /> {suggestion}
+                  <SparkIcon />
+                  <span>{suggestion}</span>
                 </button>
               ))}
-              <span className="hint">Enter to search · Shift + Enter for a new line</span>
             </div>
-          </div>
-
-          {searching && (
-            <>
-              <div className="results-head">
-                <h2>Searching frames…</h2>
-              </div>
-              <div className="clip-grid">
-                {Array.from({ length: 6 }, (_, index) => (
-                  <div key={index} className="skeleton" />
-                ))}
-              </div>
-            </>
-          )}
-
-          {!searching && clips && (
-            <>
-              <div className="results-head">
-                <h2>
-                  {clips.length} {clips.length === 1 ? 'clip' : 'clips'} for “
-                  {lastQuery}”
-                </h2>
-                {meta && (
-                  <span>
-                    {meta.tookMs} ms ·{' '}
-                    {meta.source === 'api'
-                      ? 'ranked by backend'
-                      : 'demo ranking (no backend configured)'}
-                  </span>
-                )}
-              </div>
-
-              {clips.length === 0 ? (
-                <section className="panel" style={{ marginTop: 0 }}>
-                  <div className="empty">
-                    <span className="empty-icon">
-                      <SearchIcon />
-                    </span>
-                    <h3>No frames matched</h3>
-                    <p>
-                      Try describing what’s visible in the shot — objects,
-                      setting, colours — rather than what’s said.
-                    </p>
-                  </div>
-                </section>
-              ) : (
-                <div className="clip-grid">
-                  {clips.map((clip, index) => {
-                    const thumb = thumbs.get(clip.frame)
-                    return (
-                      <button
-                        key={clip.id}
-                        type="button"
-                        className={`clip${activeClip === clip.id ? ' is-playing' : ''}`}
-                        style={{ animationDelay: `${index * 30}ms` }}
-                        onClick={() => playClip(clip)}
-                      >
-                        <span className="clip-thumb">
-                          {thumb ? (
-                            <img src={thumb} alt="" />
-                          ) : (
-                            <span className="clip-thumb-fallback">
-                              Frame at {timecode(clip.frame)}
-                            </span>
-                          )}
-                          <span className="clip-play">
-                            <i>
-                              <PlayIcon />
-                            </i>
-                          </span>
-                          <span className="clip-time">
-                            {timecode(clip.start)} – {timecode(clip.end)}
-                          </span>
-                        </span>
-                        <span className="clip-body">
-                          <span className="clip-title">
-                            Match #{index + 1} · frame at {timecode(clip.frame)}
-                          </span>
-                          <span className="clip-foot">
-                            <span className="match">
-                              <i
-                                style={{
-                                  width: `${Math.round(clip.score * 100)}%`,
-                                }}
-                              />
-                            </span>
-                            <span className="match-val">
-                              {Math.round(clip.score * 100)}%
-                            </span>
-                          </span>
-                        </span>
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-            </>
-          )}
-
-          {!searching && !clips && (
-            <section className="panel">
-              <div className="empty">
-                <span className="empty-icon">
-                  <SparkIcon />
-                </span>
-                <h3>Describe what you’re looking for</h3>
-                <p>
-                  Matching runs on what the camera saw, so describe the visuals:
-                  “two people shaking hands in an office”, “a close-up of a
-                  laptop screen”.
-                </p>
-                <div
-                  style={{
-                    display: 'flex',
-                    gap: 8,
-                    flexWrap: 'wrap',
-                    justifyContent: 'center',
-                  }}
-                >
-                  {SUGGESTIONS.map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      type="button"
-                      className="suggest"
-                      onClick={() => {
-                        setPrompt(suggestion)
-                        void runSearch(suggestion)
-                      }}
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </section>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-primary btn-lg"
+              onClick={() => setUploadOpen(true)}
+            >
+              <UploadIcon />
+              Add your first video
+            </button>
           )}
         </div>
+      )}
 
-        <aside className="player-card">
-          <div className="player-frame">
-            {src ? (
-              <video ref={playerRef} src={src} controls playsInline />
-            ) : (
-              <div className="player-placeholder">
-                <FilmIcon />
-                <p>
-                  The video file isn’t attached to this tab. Re-attach it to play
-                  matches back.
-                </p>
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  style={{ marginTop: 12 }}
-                  onClick={() => reattachRef.current?.click()}
-                >
-                  Re-attach file
-                </button>
-                <input
-                  ref={reattachRef}
-                  type="file"
-                  accept="video/*"
-                  className="sr-only"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0]
-                    if (file && selected) setSrc(attachSource(selected.id, file))
-                    event.target.value = ''
-                  }}
-                />
-              </div>
-            )}
-          </div>
+      <UploadDialog
+        open={uploadOpen}
+        onClose={() => setUploadOpen(false)}
+        onReady={(video) => {
+          setSelectedId(video.id)
+          setSrc(sourceFor(video.id) ?? '')
+          promptRef.current?.focus()
+        }}
+      />
 
-          {selected && (
-            <div className="player-meta">
-              <span className="lib-thumb" style={{ width: 54, height: 32 }}>
-                {selected.poster ? (
-                  <img src={selected.poster} alt="" />
-                ) : (
-                  <PlayIcon />
-                )}
-              </span>
-              <div style={{ minWidth: 0 }}>
-                <b>{selected.name}</b>
-                <span>
-                  {humanDuration(selected.duration)} ·{' '}
-                  {selected.frames.toLocaleString()} frames indexed
-                </span>
-              </div>
-            </div>
-          )}
-        </aside>
-      </div>
+      <ClipLightbox
+        clip={openClip}
+        clips={clips ?? []}
+        video={selected}
+        src={src}
+        prompt={lastQuery}
+        onSelect={setOpenClip}
+        onClose={() => setOpenClip(null)}
+      />
     </AppShell>
   )
 }

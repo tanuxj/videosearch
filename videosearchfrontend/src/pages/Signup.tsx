@@ -29,7 +29,7 @@ export default function Signup() {
     setBusy(true)
     try {
       await signUp(name, email, password)
-      navigate('/upload', true)
+      navigate('/search?upload=1', true)
     } catch (error) {
       setFormError(
         error instanceof Error ? error.message : 'Could not create the account.',
