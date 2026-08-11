@@ -16,8 +16,9 @@ from app.auth.schemas import MessageResponse
 from app.core.config import get_settings
 from app.videos import pipeline
 from app.videos import service as videos_service
-from app.videos.schemas import VideoListOut, VideoOut
+from app.videos.schemas import StreamUrlOut, VideoListOut, VideoOut
 from app.videos.storage import storage
+from app.videos.streaming import build_stream_url
 
 settings = get_settings()
 
@@ -108,6 +109,32 @@ async def get_video(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> Vi
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
     return VideoOut.model_validate(video)
+
+
+@router.get(
+    "/{video_id}/stream-url",
+    response_model=StreamUrlOut,
+    summary="Get a playback URL for a video",
+    description=(
+        "Returns a short-lived signed URL served by the edge streaming Worker "
+        "when configured; otherwise falls back to the API-proxied stream path. "
+        "The frontend uses this to play videos without the API proxying bytes."
+    ),
+    responses={404: {"description": "Video not found"}},
+)
+async def stream_url(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> StreamUrlOut:
+    try:
+        video = await videos_service.get_video(db, user.id, video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+
+    signed = build_stream_url(video.storage_key)
+    if signed is not None:
+        return StreamUrlOut(url=signed, worker=True)
+    return StreamUrlOut(
+        url=f"{settings.api_v1_prefix}/videos/{video_id}/stream",
+        worker=False,
+    )
 
 
 @router.get(

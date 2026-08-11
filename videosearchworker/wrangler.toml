@@ -1,0 +1,23 @@
+# videosearch-stream — edge playback proxy.
+#
+# Deploy with:
+#   cd videosearchworker
+#   npm install
+#   npx wrangler secret put STREAM_SIGN_SECRET   # same value as the backend's STREAM_SIGNING_SECRET
+#   npx wrangler deploy
+#
+# The printed *.workers.dev URL goes in the backend's STREAM_WORKER_BASE_URL.
+
+name = "videosearch-stream"
+main = "src/index.ts"
+compatibility_date = "2025-08-01"
+
+# Frontend origins allowed to stream videos (canvas capture needs CORS).
+# Add your production frontend URL before going live, e.g.:
+#   npx wrangler secret put ALLOWED_ORIGINS -- "https://app.example.com"
+# (If unset, the Worker falls back to localhost:5174 dev origins.)
+#
+# Same bucket the FastAPI backend writes to (R2_BUCKET_NAME).
+[[r2_buckets]]
+binding = "VIDEO_BUCKET"
+bucket_name = "safeguard"

@@ -210,20 +210,41 @@ function revokeSource(videoId: string): void {
 }
 
 /**
- * An object URL for playback of a server video: downloads the file once via
- * the authenticated stream endpoint (the browser's `<video>` element cannot
- * send the bearer token itself) and caches the blob URL for this tab session.
+ * A playable source for a server video.
+ *
+ * Prefers the signed edge URL served by the Cloudflare streaming Worker
+ * (`worker: true`) — the browser streams it directly from the edge with
+ * Range support, so no bytes touch the API. Falls back to downloading the
+ * file once via the authenticated stream endpoint and caching a blob URL
+ * for this tab session.
  */
 export async function streamSourceFor(videoId: string): Promise<string> {
   const cached = objectUrls.get(videoId)
   if (cached) return cached
+
+  let edgeUrl: string | null = null
+  try {
+    const data = await apiFetch<{ url: string; worker: boolean }>(
+      `/api/v1/videos/${videoId}/stream-url`,
+    )
+    if (data.worker) edgeUrl = data.url
+  } catch {
+    // Older backend without stream-url — fall through to the blob path.
+  }
+
+  if (edgeUrl) {
+    // Signed URLs are short-lived; mint a fresh one each time rather than
+    // caching it for the whole session.
+    return edgeUrl
+  }
+
   const blob = await apiFetch<Blob>(`/api/v1/videos/${videoId}/stream`, {
     headers: { Accept: 'video/*' },
     parseBlob: true,
   })
-  const url = URL.createObjectURL(blob)
-  objectUrls.set(videoId, url)
-  return url
+  const blobUrl = URL.createObjectURL(blob)
+  objectUrls.set(videoId, blobUrl)
+  return blobUrl
 }
 
 /* ── Live library view ───────────────────────────────────── */

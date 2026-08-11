@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     # Local fallback storage for when R2 is not configured.
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
 
+    # ── Edge streaming (Cloudflare Worker) ──────────────────────
+    # When `stream_worker_base_url` is set, `GET /videos/{id}/stream-url`
+    # returns a short-lived HMAC-signed URL served by the edge Worker
+    # (videosearchworker/) instead of proxying video bytes through the API.
+    # `stream_signing_secret` must match the Worker's STREAM_SIGN_SECRET.
+    stream_worker_base_url: str | None = None
+    stream_signing_secret: str = ""
+    stream_url_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
+
     # ── Indexing pipeline ───────────────────────────────────────
     # CLIP variant used to embed frames and prompts. Hugging Face model id
     # for sentence-transformers; downloads to the HF cache on first use.

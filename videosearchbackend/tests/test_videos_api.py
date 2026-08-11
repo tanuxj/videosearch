@@ -194,6 +194,61 @@ def test_stream_someone_elses_video_is_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+# ── Stream URL (edge worker) ───────────────────────────────────
+
+
+def test_stream_url_falls_back_to_api_path_without_worker(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos import routes
+
+    monkeypatch.setattr(routes.settings, "stream_worker_base_url", None)
+    headers = _auth_headers(client)
+    video_id = _upload(client, headers)["id"]
+
+    response = client.get(f"/api/v1/videos/{video_id}/stream-url", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["worker"] is False
+    assert body["url"] == f"/api/v1/videos/{video_id}/stream"
+
+
+def test_stream_url_returns_signed_worker_url_when_configured(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos import streaming
+
+    # routes and streaming both read the same cached settings singleton.
+    monkeypatch.setattr(
+        streaming.settings, "stream_worker_base_url", "https://edge.example.com"
+    )
+    monkeypatch.setattr(streaming.settings, "stream_signing_secret", "secret")
+    monkeypatch.setattr(streaming.settings, "stream_url_ttl_seconds", 3600)
+
+    headers = _auth_headers(client)
+    video_id = _upload(client, headers)["id"]
+
+    response = client.get(f"/api/v1/videos/{video_id}/stream-url", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["worker"] is True
+    assert body["url"].startswith("https://edge.example.com/stream/")
+    assert "expires=" in body["url"]
+    assert "sig=" in body["url"]
+
+
+def test_stream_url_someone_elses_video_is_404(client: TestClient) -> None:
+    mine = _auth_headers(client)
+    video_id = _upload(client, mine)["id"]
+    _auth_headers(client, email="other@example.com", name="Other Person")
+
+    response = client.get(
+        f"/api/v1/videos/{video_id}/stream-url",
+        headers={"Authorization": f"Bearer {_signin_other(client)}"},
+    )
+    assert response.status_code == 404
+
+
 # ── Delete ─────────────────────────────────────────────────────
 
 

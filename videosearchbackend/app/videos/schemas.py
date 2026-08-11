@@ -26,3 +26,14 @@ class VideoOut(BaseModel):
 class VideoListOut(BaseModel):
     items: list[VideoOut]
     count: int = Field(description="Number of videos returned.")
+
+
+class StreamUrlOut(BaseModel):
+    """A playback URL for a video.
+
+    `worker=true` means the URL points at the edge streaming Worker and is
+    signed (short-lived); `worker=false` is the classic API-proxied stream.
+    """
+
+    url: str
+    worker: bool

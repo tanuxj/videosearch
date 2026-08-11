@@ -24,3 +24,6 @@ uv.lock.tmp
 !.vscode/extensions.json
 .idea
 .DS_Store
+
+# ignore test uploads
+.test-uploads/
