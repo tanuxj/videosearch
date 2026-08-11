@@ -2,8 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useLocation } from '../lib/router'
 import { useAuth } from '../lib/auth'
-import { attachSource, captureFrames, sourceFor, useVideos } from '../lib/store'
+import {
+  attachSource,
+  captureFrames,
+  sourceFor,
+  streamSourceFor,
+  useVideos,
+} from '../lib/store'
 import type { VideoRecord } from '../lib/store'
+import { API_ENABLED } from '../lib/http'
 import { SUGGESTIONS, searchClips } from '../lib/api'
 import type { Clip } from '../lib/api'
 import { AppShell } from '../components/Shell'
@@ -57,29 +64,59 @@ export default function Search() {
 
   // Switching videos invalidates the previous results.
   useEffect(() => {
-    setSrc(selectedId ? (sourceFor(selectedId) ?? '') : '')
     setClips(null)
     setThumbs(new Map())
     setOpenClip(null)
     setMeta(null)
   }, [selectedId])
 
+  // Playback source: a local file attached this session, or the server's
+  // stream (downloaded once as an authenticated blob) once the video is ready.
+  const selectedStatus = selected?.status ?? null
+  useEffect(() => {
+    let cancelled = false
+    if (!selectedId) {
+      setSrc('')
+      return
+    }
+    const attached = sourceFor(selectedId)
+    if (attached) {
+      setSrc(attached)
+      return
+    }
+    if (API_ENABLED && selectedStatus === 'ready') {
+      streamSourceFor(selectedId)
+        .then((streamUrl) => {
+          if (!cancelled) setSrc(streamUrl)
+        })
+        .catch(() => {
+          /* playback stays unavailable — results still rank */
+        })
+    } else {
+      setSrc('')
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [selectedId, selectedStatus])
+
   async function runSearch(text: string) {
     const trimmed = text.trim()
-    if (!trimmed || !selected) return
+    const target = selected
+    if (!trimmed || !target || target.status !== 'ready') return
 
     setSearching(true)
     setOpenClip(null)
     setThumbs(new Map())
     setLastQuery(trimmed)
 
-    const result = await searchClips(selected, trimmed)
+    const result = await searchClips(target, trimmed)
     setClips(result.clips)
     setMeta({ source: result.source, tookMs: result.tookMs })
     setSearching(false)
 
     // Real thumbnails, pulled from the file that's already in the browser.
-    const source = sourceFor(selected.id)
+    const source = sourceFor(target.id)
     if (source && result.clips.length > 0) {
       setThumbs(
         await captureFrames(
@@ -97,7 +134,10 @@ export default function Search() {
     }
   }
 
-  const canSearch = Boolean(selected) && Boolean(prompt.trim()) && !searching
+  const canSearch =
+    selected?.status === 'ready' &&
+    Boolean(prompt.trim()) &&
+    !searching
 
   return (
     <AppShell
@@ -125,9 +165,19 @@ export default function Search() {
             />
             {selected && (
               <span
-                className={`chip ${selected.status === 'ready' ? 'chip-ok' : 'chip-warn'}`}
+                className={`chip ${
+                  selected.status === 'ready'
+                    ? 'chip-ok'
+                    : selected.status === 'failed'
+                      ? 'chip-bad'
+                      : 'chip-warn'
+                }`}
               >
-                {selected.status === 'ready' ? 'Indexed' : 'Indexing'}
+                {selected.status === 'ready'
+                  ? 'Indexed'
+                  : selected.status === 'failed'
+                    ? 'Indexing failed'
+                    : 'Indexing'}
               </span>
             )}
           </div>
@@ -179,28 +229,35 @@ export default function Search() {
           </div>
         </div>
 
-        {selected && !src && (
+        {selected && !src && selected.status !== 'failed' && (
           <p className="composer-note">
-            Playback for this video isn’t attached to this tab — results still
-            rank, but you’ll need the file to watch them.
-            <button
-              type="button"
-              className="linkish"
-              onClick={() => reattachRef.current?.click()}
-            >
-              Re-attach file
-            </button>
-            <input
-              ref={reattachRef}
-              type="file"
-              accept="video/*"
-              className="sr-only"
-              onChange={(event) => {
-                const file = event.target.files?.[0]
-                if (file && selected) setSrc(attachSource(selected.id, file))
-                event.target.value = ''
-              }}
-            />
+            {selected.status === 'processing'
+              ? 'Indexing is still running — search unlocks once every frame is embedded.'
+              : API_ENABLED
+                ? 'Loading playback from your library…'
+                : 'Playback for this video isn’t attached to this tab — results still rank, but you’ll need the file to watch them.'}
+            {!API_ENABLED && (
+              <>
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => reattachRef.current?.click()}
+                >
+                  Re-attach file
+                </button>
+                <input
+                  ref={reattachRef}
+                  type="file"
+                  accept="video/*"
+                  className="sr-only"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0]
+                    if (file && selected) setSrc(attachSource(selected.id, file))
+                    event.target.value = ''
+                  }}
+                />
+              </>
+            )}
           </p>
         )}
       </div>
@@ -346,7 +403,6 @@ export default function Search() {
         onClose={() => setUploadOpen(false)}
         onReady={(video) => {
           setSelectedId(video.id)
-          setSrc(sourceFor(video.id) ?? '')
           promptRef.current?.focus()
         }}
       />

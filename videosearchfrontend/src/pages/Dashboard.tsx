@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from '../lib/router'
 import { useAuth } from '../lib/auth'
 import { removeVideo, sourceFor, useVideos } from '../lib/store'
+import { API_ENABLED } from '../lib/http'
 import { AppShell } from '../components/Shell'
 import { UploadDialog } from '../components/UploadDialog'
 import {
@@ -147,10 +148,17 @@ export default function Dashboard() {
               <div className="lib-actions">
                 {video.status === 'ready' ? (
                   <span className="chip chip-ok">Indexed</span>
+                ) : video.status === 'failed' ? (
+                  <span
+                    className="chip chip-bad"
+                    title={video.error || 'Indexing failed on the server'}
+                  >
+                    Failed
+                  </span>
                 ) : (
                   <span className="chip chip-warn">Processing</span>
                 )}
-                {!sourceFor(video.id) && (
+                {!API_ENABLED && !sourceFor(video.id) && (
                   <span
                     className="chip"
                     title="The file handle was lost when the tab reloaded — re-attach it on the search page to play clips back."
@@ -173,7 +181,7 @@ export default function Dashboard() {
                   onClick={() => {
                     if (!user) return
                     if (confirm(`Delete “${video.name}” and its frame index?`))
-                      removeVideo(user.id, video.id)
+                      void removeVideo(user.id, video.id)
                   }}
                 >
                   <TrashIcon />

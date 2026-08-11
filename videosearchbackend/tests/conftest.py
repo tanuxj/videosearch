@@ -22,6 +22,13 @@ _TEST_DB_URL = os.environ.get("TEST_DATABASE_URL")
 if _TEST_DB_URL:
     os.environ["DATABASE_URL"] = _TEST_DB_URL
 
+# Tests must never touch a real object-storage bucket, their files go to a
+# throwaway dir, and uploads must not auto-start the CLIP indexing job (the
+# model is hundreds of MB and tests mock the embedder instead).
+os.environ.setdefault("STORAGE_BACKEND", "local")
+os.environ.setdefault("UPLOAD_DIR", os.path.join(os.path.dirname(__file__), ".test-uploads"))
+os.environ.setdefault("INDEX_ON_UPLOAD", "false")
+
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
@@ -115,8 +122,10 @@ def _schema() -> None:
 
     async def create() -> None:
         async with engine.begin() as connection:
-            # users.id defaults to gen_random_uuid().
+            # users.id defaults to gen_random_uuid(); frames.embedding is a
+            # pgvector column with an HNSW index.
             await connection.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
+            await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await connection.run_sync(Base.metadata.create_all)
 
     async def drop() -> None:

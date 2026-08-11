@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useState } from 'react'
+import { API_ENABLED, ApiError, apiFetch, getAccessToken, url } from './http'
 
 /**
- * Video library — metadata is persisted per user in localStorage, while the
- * playable object URL only lives for the current tab session (a File handle
- * can't be serialized). Videos uploaded in an earlier session therefore stay
- * listed and searchable, but show a "re-attach the file" state in the player.
+ * Video library.
+ *
+ * Two backends behind one interface:
+ *
+ * * **Server mode** (`VITE_API_URL` set) — videos live in Postgres, files in
+ *   R2/local disk. `useVideos` lists via `GET /api/v1/videos` and keeps
+ *   polling while any video is still `processing` so the real indexing
+ *   progress shows up live. Playback is an object URL from the authenticated
+ *   stream endpoint (fetched once per session, cached here).
+ * * **Demo mode** (no backend) — metadata persists per user in localStorage
+ *   and playback needs the original `File` handle, which only survives the
+ *   current tab session.
  */
 
-export type VideoStatus = 'processing' | 'ready'
+export type VideoStatus = 'processing' | 'ready' | 'failed'
 
 export type VideoRecord = {
   id: string
@@ -19,10 +28,29 @@ export type VideoRecord = {
   createdAt: string
   /** Small JPEG data URL captured from the first seconds of the video. */
   poster?: string
+  /** Server-side failure message (status === 'failed'). */
+  error?: string
+}
+
+/** Backend `VideoOut` shape (snake_case) — mapped to `VideoRecord` below. */
+type ApiVideo = {
+  id: string
+  name: string
+  size_bytes: number
+  duration_seconds: number | null
+  status: VideoStatus
+  error: string | null
+  frames_total: number
+  frames_indexed: number
+  created_at: string
 }
 
 const objectUrls = new Map<string, string>()
 const listeners = new Set<() => void>()
+
+// While any video is still processing, re-poll the server this often so the
+// dashboard/search pages show live indexing progress.
+const POLL_MS = 3000
 
 function key(userId: string): string {
   return `vs.videos.${userId}`
@@ -32,7 +60,9 @@ function emit(): void {
   for (const listener of listeners) listener()
 }
 
-export function listVideos(userId: string): VideoRecord[] {
+/* ── Demo-mode localStorage persistence ──────────────────── */
+
+function listLocal(userId: string): VideoRecord[] {
   try {
     const raw = localStorage.getItem(key(userId))
     const items = raw ? (JSON.parse(raw) as VideoRecord[]) : []
@@ -42,7 +72,7 @@ export function listVideos(userId: string): VideoRecord[] {
   }
 }
 
-function write(userId: string, items: VideoRecord[]): void {
+function writeLocal(userId: string, items: VideoRecord[]): void {
   try {
     localStorage.setItem(key(userId), JSON.stringify(items))
   } catch {
@@ -55,22 +85,109 @@ function write(userId: string, items: VideoRecord[]): void {
   emit()
 }
 
-export function saveVideo(userId: string, video: VideoRecord): void {
-  const items = listVideos(userId).filter((item) => item.id !== video.id)
-  write(userId, [video, ...items])
-}
+/* ── API mapping ─────────────────────────────────────────── */
 
-export function removeVideo(userId: string, videoId: string): void {
-  write(
-    userId,
-    listVideos(userId).filter((item) => item.id !== videoId),
-  )
-  const url = objectUrls.get(videoId)
-  if (url) {
-    URL.revokeObjectURL(url)
-    objectUrls.delete(videoId)
+function toRecord(video: ApiVideo): VideoRecord {
+  return {
+    id: video.id,
+    name: video.name,
+    sizeBytes: video.size_bytes,
+    duration: video.duration_seconds ?? 0,
+    frames: video.frames_indexed,
+    status: video.status,
+    createdAt: video.created_at,
+    error: video.error ?? undefined,
   }
 }
+
+/* ── Public operations ───────────────────────────────────── */
+
+/** Fetch the server's list of the user's videos, newest first. */
+async function listApi(): Promise<VideoRecord[]> {
+  const data = await apiFetch<{ items: ApiVideo[] }>('/api/v1/videos')
+  return data.items
+    .map(toRecord)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+}
+
+export async function listVideos(userId: string): Promise<VideoRecord[]> {
+  if (API_ENABLED) return listApi()
+  return listLocal(userId)
+}
+
+/** Read a single video (used to poll indexing progress after an upload). */
+export async function getVideo(videoId: string): Promise<VideoRecord | null> {
+  if (!API_ENABLED) return null
+  try {
+    return toRecord(await apiFetch<ApiVideo>(`/api/v1/videos/${videoId}`))
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+}
+
+/**
+ * Create a video on the server. The multipart body is sent directly (with the
+ * bearer token) because `apiFetch` assumes JSON.
+ */
+export async function createVideoApi(
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<VideoRecord> {
+  const form = new FormData()
+  form.append('file', file)
+
+  const response = await fetch(url('/api/v1/videos'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
+    },
+    body: form,
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, await readError(response, 'Upload failed'))
+  }
+  const video = (await response.json()) as ApiVideo
+  onProgress?.(file.size, file.size)
+  return toRecord(video)
+}
+
+async function readError(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = await response.json()
+    const detail = body?.detail
+    if (typeof detail === 'string') return detail
+    if (Array.isArray(detail) && detail[0]?.msg) return String(detail[0].msg)
+  } catch {
+    /* not JSON */
+  }
+  return fallback
+}
+
+export async function removeVideo(userId: string, videoId: string): Promise<void> {
+  if (API_ENABLED) {
+    await apiFetch(`/api/v1/videos/${videoId}`, { method: 'DELETE' })
+  } else {
+    writeLocal(
+      userId,
+      listLocal(userId).filter((item) => item.id !== videoId),
+    )
+  }
+  revokeSource(videoId)
+  emit()
+}
+
+export async function saveVideo(userId: string, video: VideoRecord): Promise<void> {
+  if (API_ENABLED) {
+    // The server owns the record — demo-mode persistence is a no-op.
+    return
+  }
+  const items = listLocal(userId).filter((item) => item.id !== video.id)
+  writeLocal(userId, [video, ...items])
+}
+
+/* ── Playback sources ────────────────────────────────────── */
 
 export function attachSource(videoId: string, file: File): string {
   const previous = objectUrls.get(videoId)
@@ -84,14 +201,60 @@ export function sourceFor(videoId: string): string | undefined {
   return objectUrls.get(videoId)
 }
 
-/** Live view of a user's library; re-renders when videos are added/removed. */
+function revokeSource(videoId: string): void {
+  const url = objectUrls.get(videoId)
+  if (url) {
+    URL.revokeObjectURL(url)
+    objectUrls.delete(videoId)
+  }
+}
+
+/**
+ * An object URL for playback of a server video: downloads the file once via
+ * the authenticated stream endpoint (the browser's `<video>` element cannot
+ * send the bearer token itself) and caches the blob URL for this tab session.
+ */
+export async function streamSourceFor(videoId: string): Promise<string> {
+  const cached = objectUrls.get(videoId)
+  if (cached) return cached
+  const blob = await apiFetch<Blob>(`/api/v1/videos/${videoId}/stream`, {
+    headers: { Accept: 'video/*' },
+    parseBlob: true,
+  })
+  const url = URL.createObjectURL(blob)
+  objectUrls.set(videoId, url)
+  return url
+}
+
+/* ── Live library view ───────────────────────────────────── */
+
+/**
+ * Live view of the user's library; re-renders when videos change and, in
+ * server mode, re-polls while anything is still indexing.
+ */
 export function useVideos(userId: string | undefined): VideoRecord[] {
-  const [videos, setVideos] = useState<VideoRecord[]>(() =>
-    userId ? listVideos(userId) : [],
-  )
+  const [videos, setVideos] = useState<VideoRecord[]>([])
+  const [refreshTick, setRefreshTick] = useState(0)
 
   const refresh = useCallback(() => {
-    setVideos(userId ? listVideos(userId) : [])
+    if (!userId) {
+      setVideos([])
+      return
+    }
+    void listVideos(userId)
+      .then((items) => {
+        setVideos(items)
+        // If anything is still indexing, keep polling so status/progress move.
+        if (items.some((video) => video.status === 'processing')) {
+          window.setTimeout(() => setRefreshTick((tick) => tick + 1), POLL_MS)
+        }
+      })
+      .catch(() => {
+        // Transient network/refresh failure — keep the poll alive so the
+        // dashboard recovers instead of freezing on stale data. The timeout
+        // is scheduled regardless of success.
+        window.setTimeout(() => setRefreshTick((tick) => tick + 1), POLL_MS)
+      })
   }, [userId])
 
   useEffect(() => {
@@ -102,7 +265,7 @@ export function useVideos(userId: string | undefined): VideoRecord[] {
       listeners.delete(refresh)
       window.removeEventListener('storage', refresh)
     }
-  }, [refresh])
+  }, [refresh, refreshTick])
 
   return videos
 }

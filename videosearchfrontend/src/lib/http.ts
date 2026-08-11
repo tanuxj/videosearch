@@ -109,7 +109,7 @@ export function refreshSession(): Promise<TokenPayload | null> {
   return refreshInFlight
 }
 
-type FetchOptions = RequestInit & { auth?: boolean }
+type FetchOptions = RequestInit & { auth?: boolean; parseBlob?: boolean }
 
 /**
  * `fetch` for this API: JSON in, JSON out, bearer token attached, and one
@@ -147,5 +147,6 @@ export async function apiFetch<T>(path: string, options: FetchOptions = {}): Pro
   }
 
   if (response.status === 204) return undefined as T
+  if (options.parseBlob) return (await response.blob()) as T
   return (await response.json()) as T
 }

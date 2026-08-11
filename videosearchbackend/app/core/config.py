@@ -65,6 +65,35 @@ class Settings(BaseSettings):
     refresh_cookie_secure: bool = False
     refresh_cookie_domain: str | None = None
 
+    # ── Object storage (Cloudflare R2 / any S3 endpoint) ──────────
+    # When configured, uploaded videos and thumbnails live in R2. Without
+    # it the app falls back to the local `upload_dir` (dev/tests).
+    r2_endpoint_url: str | None = None
+    r2_bucket_name: str | None = None
+    r2_region: str = "auto"
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+
+    # Where uploads actually go: "r2" always uses the bucket, "local" always
+    # uses the disk, "auto" (default) picks R2 when configured, else disk.
+    # Tests force "local" so they never touch the real bucket.
+    storage_backend: Literal["r2", "local", "auto"] = "auto"
+
+    # Local fallback storage for when R2 is not configured.
+    upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
+
+    # ── Indexing pipeline ───────────────────────────────────────
+    # CLIP variant used to embed frames and prompts. Hugging Face model id
+    # for sentence-transformers; downloads to the HF cache on first use.
+    clip_model_name: str = "clip-ViT-B-32"
+    # Start the indexing job automatically on upload. Tests flip this off
+    # so uploads stay `processing` until the test runs the pipeline itself.
+    index_on_upload: bool = True
+    # Frames are sampled at this interval (seconds). 1.0 = one frame per second.
+    frame_interval_seconds: float = 1.0
+    # Rows per batch when writing embeddings to Postgres.
+    index_batch_size: int = 128
+
     # ── Postgres database (spawned by docker-compose) ────────────
     # The compose stack passes these to the container; when running the
     # app locally they default to the same dev values.
@@ -110,6 +139,23 @@ class Settings(BaseSettings):
     @property
     def refresh_token_ttl_seconds(self) -> int:
         return self.refresh_token_ttl_days * 24 * 60 * 60
+
+    @property
+    def storage_configured(self) -> bool:
+        """True when all R2 credentials are present and non-empty."""
+        return bool(
+            self.r2_endpoint_url
+            and self.r2_bucket_name
+            and self.r2_access_key_id
+            and self.r2_secret_access_key
+        )
+
+    @property
+    def effective_storage_backend(self) -> str:
+        """The backend that will actually be used, resolving `auto`."""
+        if self.storage_backend == "auto":
+            return "r2" if self.storage_configured else "local"
+        return self.storage_backend
 
 
 @lru_cache
