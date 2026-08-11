@@ -7,5 +7,6 @@ line per feature as they land.
 
 from app.auth import models as auth_models  # noqa: F401  (registers tables)
 from app.db.base import Base
+from app.videos import models as videos_models  # noqa: F401  (registers tables)
 
 __all__ = ["Base"]
