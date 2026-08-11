@@ -254,6 +254,12 @@ select {
   border-color: #f2e0bf;
 }
 
+.chip-bad {
+  background: var(--danger-wash);
+  color: var(--danger);
+  border-color: #f5cdd3;
+}
+
 .chip-accent {
   background: var(--accent-wash);
   color: var(--accent);

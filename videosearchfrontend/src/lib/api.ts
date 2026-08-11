@@ -1,12 +1,12 @@
 import type { VideoRecord } from './store'
+import { API_ENABLED, getAccessToken, url } from './http'
 
 /**
  * Clip search. When VITE_API_URL is set the prompt goes to the backend's
- * CLIP-embedding search; otherwise the UI falls back to a deterministic local
- * ranking so the flow stays demonstrable with no server running.
+ * CLIP-embedding search (authenticated); otherwise the UI falls back to a
+ * deterministic local ranking so the flow stays demonstrable with no server
+ * running.
  */
-
-const API_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
 
 export type Clip = {
   id: string
@@ -103,11 +103,15 @@ export async function searchClips(
 ): Promise<SearchResult> {
   const startedAt = performance.now()
 
-  if (API_URL) {
+  if (API_ENABLED) {
     try {
-      const response = await fetch(`${API_URL}/api/v1/search/clips`, {
+      const response = await fetch(url('/api/v1/search/clips'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
+        },
         body: JSON.stringify({ video_id: video.id, prompt, limit }),
       })
       if (response.ok) {
@@ -131,7 +135,7 @@ export async function searchClips(
         }
       }
     } catch {
-      // Backend unreachable — fall through to the local ranking.
+      // Backend unreachable or rejected — fall through to the local ranking.
     }
   }
 

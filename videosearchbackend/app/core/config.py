@@ -82,6 +82,18 @@ class Settings(BaseSettings):
     # Local fallback storage for when R2 is not configured.
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
 
+    # ── Indexing pipeline ───────────────────────────────────────
+    # CLIP variant used to embed frames and prompts. Hugging Face model id
+    # for sentence-transformers; downloads to the HF cache on first use.
+    clip_model_name: str = "clip-ViT-B-32"
+    # Start the indexing job automatically on upload. Tests flip this off
+    # so uploads stay `processing` until the test runs the pipeline itself.
+    index_on_upload: bool = True
+    # Frames are sampled at this interval (seconds). 1.0 = one frame per second.
+    frame_interval_seconds: float = 1.0
+    # Rows per batch when writing embeddings to Postgres.
+    index_batch_size: int = 128
+
     # ── Postgres database (spawned by docker-compose) ────────────
     # The compose stack passes these to the container; when running the
     # app locally they default to the same dev values.

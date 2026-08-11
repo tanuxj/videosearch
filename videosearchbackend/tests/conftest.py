@@ -22,10 +22,12 @@ _TEST_DB_URL = os.environ.get("TEST_DATABASE_URL")
 if _TEST_DB_URL:
     os.environ["DATABASE_URL"] = _TEST_DB_URL
 
-# Tests must never touch a real object-storage bucket, and their files go
-# to a throwaway dir, not the developer's data/upload directory.
+# Tests must never touch a real object-storage bucket, their files go to a
+# throwaway dir, and uploads must not auto-start the CLIP indexing job (the
+# model is hundreds of MB and tests mock the embedder instead).
 os.environ.setdefault("STORAGE_BACKEND", "local")
 os.environ.setdefault("UPLOAD_DIR", os.path.join(os.path.dirname(__file__), ".test-uploads"))
+os.environ.setdefault("INDEX_ON_UPLOAD", "false")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

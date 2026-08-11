@@ -17,6 +17,8 @@ already implements Range requests.
 """
 
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 from botocore.client import Config as BotoConfig
@@ -111,6 +113,20 @@ class Storage:
             self._client.delete_object(Bucket=self._bucket, Key=key)
         else:
             self._local_path(key).unlink(missing_ok=True)
+
+    def get_local_path(self, key: str) -> Path:
+        """A local filesystem path holding the object's bytes.
+
+        Local backend: the stored file itself. R2 backend: a temp file the
+        caller must delete (the indexing pipeline does this in a ``finally``).
+        """
+        if self._client is not None:
+            assert self._bucket is not None
+            fd, name = tempfile.mkstemp(prefix="videosearch-", suffix=Path(key).suffix)
+            os.close(fd)
+            self._client.download_file(self._bucket, key, name)
+            return Path(name)
+        return self._local_path(key)
 
     def stream_response(
         self,

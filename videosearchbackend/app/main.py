@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db import session as db_session
 from app.videos.routes import router as videos_router
+from app.videos.search import router as clip_search_router
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ app.add_middleware(
 app.include_router(health.router, prefix=settings.api_v1_prefix, tags=["health"])
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
 app.include_router(videos_router, prefix=settings.api_v1_prefix)
+app.include_router(clip_search_router, prefix=settings.api_v1_prefix)
 app.include_router(search.router, prefix=settings.api_v1_prefix, tags=["search"])
 
 
