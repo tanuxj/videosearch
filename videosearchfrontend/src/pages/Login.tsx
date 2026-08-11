@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate } from '../lib/router'
-import { useAuth } from '../lib/auth'
+import { authErrorMessage, useAuth } from '../lib/auth'
 import { AuthLayout, Field } from '../components/AuthLayout'
 import { LockIcon, MailIcon } from '../components/Icons'
 
@@ -29,9 +29,7 @@ export default function Login() {
       await signIn(email, password)
       navigate('/dashboard', true)
     } catch (error) {
-      setFormError(
-        error instanceof Error ? error.message : 'Could not sign you in.',
-      )
+      setFormError(authErrorMessage(error, 'Could not sign you in.'))
     } finally {
       setBusy(false)
     }

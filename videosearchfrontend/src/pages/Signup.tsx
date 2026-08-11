@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate } from '../lib/router'
-import { useAuth } from '../lib/auth'
+import { authErrorMessage, useAuth } from '../lib/auth'
 import { AuthLayout, Field } from '../components/AuthLayout'
 import { LockIcon, MailIcon, UserIcon } from '../components/Icons'
 
@@ -31,9 +31,7 @@ export default function Signup() {
       await signUp(name, email, password)
       navigate('/search?upload=1', true)
     } catch (error) {
-      setFormError(
-        error instanceof Error ? error.message : 'Could not create the account.',
-      )
+      setFormError(authErrorMessage(error, 'Could not create the account.'))
     } finally {
       setBusy(false)
     }

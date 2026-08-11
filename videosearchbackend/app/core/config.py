@@ -2,13 +2,16 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["development", "test", "production"]
 
 # Root of the backend project (two levels up from this file).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Obvious placeholder — refused outright when APP_ENV=production.
+DEV_JWT_SECRET = "dev-only-insecure-secret-change-me"
 
 
 class Settings(BaseSettings):
@@ -42,6 +45,26 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # ── Authentication ───────────────────────────────────────────
+    # Access tokens are short-lived JWTs held in memory by the client;
+    # refresh tokens are opaque, stored hashed in Postgres and delivered
+    # in an httpOnly cookie so JavaScript can never read them.
+    jwt_secret: str = DEV_JWT_SECRET
+    jwt_algorithm: str = "HS256"
+    access_token_ttl_minutes: int = Field(default=15, ge=1, le=1440)
+    refresh_token_ttl_days: int = Field(default=30, ge=1, le=365)
+
+    refresh_cookie_name: str = "vs_refresh"
+    # Cookie is scoped to the auth routes — it is never sent to any other
+    # endpoint, so a leak in an unrelated handler cannot expose it.
+    refresh_cookie_path: str = "/api/v1/auth"
+    # Lax works across ports on the same site (localhost:5174 → :3006).
+    # Deploying the API on a different registrable domain needs
+    # "none" + secure=true.
+    refresh_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    refresh_cookie_secure: bool = False
+    refresh_cookie_domain: str | None = None
+
     # ── Postgres database (spawned by docker-compose) ────────────
     # The compose stack passes these to the container; when running the
     # app locally they default to the same dev values.
@@ -58,6 +81,35 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _reject_dev_secret_in_production(self) -> "Settings":
+        if self.app_env == "production" and self.jwt_secret == DEV_JWT_SECRET:
+            raise ValueError(
+                "JWT_SECRET is still the development placeholder. "
+                "Set a strong random value, e.g. `openssl rand -hex 32`."
+            )
+        return self
+
+    @property
+    def async_database_url(self) -> str:
+        """`DATABASE_URL` normalised to the asyncpg driver SQLAlchemy needs."""
+        url = self.database_url
+        if url.startswith("postgresql+"):
+            return url
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgres://"):  # Heroku-style alias
+            return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        return url
+
+    @property
+    def access_token_ttl_seconds(self) -> int:
+        return self.access_token_ttl_minutes * 60
+
+    @property
+    def refresh_token_ttl_seconds(self) -> int:
+        return self.refresh_token_ttl_days * 24 * 60 * 60
 
 
 @lru_cache

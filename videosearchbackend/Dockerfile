@@ -14,6 +14,10 @@ ENV UV_COMPILE_BYTECODE=1 \
 # Install dependencies first (better layer caching); requires uv.lock
 COPY pyproject.toml uv.lock README.md ./
 COPY app ./app
+# Shipped so migrations can be applied from the running container:
+#   docker compose run --rm backend alembic upgrade head
+COPY alembic.ini ./
+COPY migrations ./migrations
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
