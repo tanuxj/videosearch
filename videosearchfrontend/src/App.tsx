@@ -1,34 +1,77 @@
-const appName: string = import.meta.env.VITE_APP_NAME || 'VideoSearch'
+import { useEffect } from 'react'
+import { AuthProvider, useAuth } from './lib/auth'
+import { Link, useNavigate, useRoute } from './lib/router'
+import { MarketingShell } from './components/Shell'
+import Home from './pages/Home'
+import Login from './pages/Login'
+import Signup from './pages/Signup'
+import Dashboard from './pages/Dashboard'
+import Upload from './pages/Upload'
+import Search from './pages/Search'
 
-function App() {
+const PROTECTED = new Set(['/dashboard', '/upload', '/search'])
+const AUTH_ONLY = new Set(['/login', '/signup'])
+
+function NotFound() {
   return (
-    <div className="app">
-      <header className="site-header">
-        <span className="brand">
-          <span className="brand-mark">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M8 5.14v13.72L19 12 8 5.14z" />
-            </svg>
-          </span>
-          <span className="brand-name">{appName}</span>
+    <MarketingShell>
+      <section className="wrap hero">
+        <span className="eyebrow">
+          <b>404</b> Page not found
         </span>
-      </header>
-
-      <main className="app-main">
-        <h1 className="app-title">
-          Semantic <span className="gradient-text">video search</span>
-        </h1>
-        <p className="app-sub">
-          Upload a video, describe a scene in plain language, and jump straight
-          to the matching moment.
+        <h1>This page doesn’t exist</h1>
+        <p className="hero-sub">
+          The link may be out of date. Head back and pick up where you left off.
         </p>
-      </main>
-
-      <footer className="site-footer">
-        <p>React + TypeScript + Vite</p>
-      </footer>
-    </div>
+        <div className="hero-cta">
+          <Link to="/" className="btn btn-primary btn-lg">
+            Back to home
+          </Link>
+        </div>
+      </section>
+    </MarketingShell>
   )
 }
 
-export default App
+function Routes() {
+  const route = useRoute()
+  const navigate = useNavigate()
+  const { user, ready } = useAuth()
+
+  useEffect(() => {
+    if (!ready) return
+    if (!user && PROTECTED.has(route)) navigate('/login', true)
+    if (user && AUTH_ONLY.has(route)) navigate('/dashboard', true)
+  }, [ready, user, route, navigate])
+
+  // Hold the first paint until the stored session is known — otherwise
+  // protected pages flash before the redirect lands.
+  if (!ready) return null
+  if (!user && PROTECTED.has(route)) return null
+  if (user && AUTH_ONLY.has(route)) return null
+
+  switch (route) {
+    case '/':
+      return <Home />
+    case '/login':
+      return <Login />
+    case '/signup':
+      return <Signup />
+    case '/dashboard':
+      return <Dashboard />
+    case '/upload':
+      return <Upload />
+    case '/search':
+      return <Search />
+    default:
+      return <NotFound />
+  }
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Routes />
+    </AuthProvider>
+  )
+}
