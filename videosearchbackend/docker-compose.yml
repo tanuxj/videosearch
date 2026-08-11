@@ -54,6 +54,16 @@ services:
       # Inside the compose network the DB host is the service name "db".
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:5174,http://127.0.0.1:5174}"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Pass through auth + object storage + edge streaming credentials so
+      # the container behaves like the local .env (R2, signed Worker URLs).
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me}
+      R2_ENDPOINT_URL: ${R2_ENDPOINT_URL:-}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME:-}
+      R2_REGION: ${R2_REGION:-auto}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      STREAM_WORKER_BASE_URL: ${STREAM_WORKER_BASE_URL:-}
+      STREAM_SIGNING_SECRET: ${STREAM_SIGNING_SECRET:-}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-videosearch}

@@ -12,9 +12,10 @@
  * The signature covers `"<key>:<expires>"` using the shared secret
  * `STREAM_SIGN_SECRET` (set with `wrangler secret put`).
  *
- * Byte-range passthrough: the browser's `Range` header is forwarded to R2 and
- * the `206 Partial Content` / `Content-Range` headers are returned so `<video>`
- * seeking works. CORS is limited to the configured frontend origins.
+ * Byte-range passthrough: the browser's `Range` header is parsed into the R2
+ * range object form and forwarded to R2; the `206 Partial Content` /
+ * `Content-Range` headers are built from the response so `<video>` seeking
+ * works. CORS is limited to the configured frontend origins.
  */
 
 export interface Env {
@@ -88,6 +89,53 @@ function corsHeaders(origin: string | null, env: Env): Record<string, string> {
   }
 }
 
+/**
+ * Parse an HTTP Range header ("bytes=0-1023", "bytes=1024-", "bytes=-512")
+ * into the object form R2's get() accepts. Returns null for malformed or
+ * multi-range requests (we answer those with a full 200, which is safe).
+ */
+function parseRange(header: string): R2Range | null {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
+  if (!match) return null
+  const startRaw = match[1]
+  const endRaw = match[2]
+  if (startRaw === '' && endRaw === '') return null
+  if (startRaw === '') {
+    // Suffix form: last N bytes.
+    const suffix = Number(endRaw)
+    return suffix > 0 ? { suffix } : null
+  }
+  const offset = Number(startRaw)
+  if (endRaw === '') {
+    // Open-ended: from offset to end of file.
+    return { offset }
+  }
+  const end = Number(endRaw)
+  if (end < offset) return null
+  return { offset, length: end - offset + 1 }
+}
+
+/** "Content-Range" header value for a satisfied range, or null if unsatisfiable. */
+function contentRange(range: R2Range, size: number): string | null {
+  if ('suffix' in range) {
+    if (range.suffix <= 0 || size <= 0) return null
+    const start = Math.max(0, size - range.suffix)
+    return `bytes ${start}-${size - 1}/${size}`
+  }
+  const offset = range.offset ?? 0
+  if (offset >= size) return null
+  const end = offset + (range.length ?? size - offset) - 1
+  return `bytes ${offset}-${Math.min(end, size - 1)}/${size}`
+}
+
+/** Number of bytes the partial response carries, or null if unsatisfiable. */
+function partialLength(range: R2Range, size: number): number | null {
+  if ('suffix' in range) return Math.min(range.suffix, size)
+  const offset = range.offset ?? 0
+  if (offset >= size) return null
+  return Math.min(range.length ?? size - offset, size - offset)
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
@@ -113,9 +161,16 @@ export default {
       return new Response('Forbidden', { status: 403, headers: cors })
     }
 
-    // Byte-range passthrough: pass the browser's Range straight to R2.
-    const range = request.headers.get('Range')
-    const object = await env.VIDEO_BUCKET.get(key, range ? { range } : undefined)
+    const rangeHeader = request.headers.get('Range')
+    const range = rangeHeader ? parseRange(rangeHeader) : null
+
+    let object: R2ObjectBody | R2Object | null
+    try {
+      object = await env.VIDEO_BUCKET.get(key, range ? { range } : undefined)
+    } catch {
+      // R2 throws for an unsatisfiable range (e.g. start beyond EOF).
+      return new Response('Requested range not satisfiable', { status: 416, headers: cors })
+    }
     if (object === null) {
       return new Response('Not found', { status: 404, headers: cors })
     }
@@ -125,24 +180,23 @@ export default {
     headers.set('Content-Disposition', 'inline')
     headers.set('Accept-Ranges', 'bytes')
 
-    // `object.range` is a `bytes a-b/total` string at runtime (the types
-    // declare a wider union, hence the String() coercion for the header).
-    const servedRange = object.range ? String(object.range) : null
-    if (servedRange) {
-      headers.set('Content-Range', servedRange)
-      const match = /bytes (\d+)-(\d+)\/(\d+)/.exec(servedRange)
-      if (match) {
-        headers.set(
-          'Content-Length',
-          String(Number(match[2]) - Number(match[1]) + 1),
-        )
+    let status = 200
+    if (range) {
+      const served = contentRange(range, object.size)
+      const length = partialLength(range, object.size)
+      if (served === null || length === null) {
+        return new Response('Requested range not satisfiable', { status: 416, headers: cors })
       }
+      headers.set('Content-Range', served)
+      headers.set('Content-Length', String(length))
+      status = 206
     } else {
       headers.set('Content-Length', String(object.size))
     }
 
-    const status = range && servedRange ? 206 : 200
-    return new Response(request.method === 'HEAD' ? null : object.body, {
+    // No conditional reads are used, so get() always yields an R2ObjectBody
+    // (the R2Object variant only appears when a precondition fails).
+    return new Response(request.method === 'HEAD' ? null : (object as R2ObjectBody).body, {
       status,
       headers,
     })

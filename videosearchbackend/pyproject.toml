@@ -19,7 +19,10 @@ dependencies = [
     "python-multipart>=0.0.12,<1.0",
     "torch>=2.3,<3.0",
     "sentence-transformers>=3.0,<5.0",
-    "opencv-python>=4.9,<5.0",
+    # Headless wheel: the GUI-enabled `opencv-python` needs X11/GTK system
+    # libraries that don't exist in the slim Docker image. We only decode
+    # frames (VideoCapture) — no GUI — so headless is exactly right.
+    "opencv-python-headless>=4.9,<5.0",
 ]
 
 # torch from the CPU-only wheelhouse: the PyPI default build bundles CUDA,
