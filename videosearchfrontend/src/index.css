@@ -329,21 +329,22 @@ select {
   color: var(--text);
 }
 
+/* The mark is a self-contained SVG tile — CSS only rounds and lifts it. */
 .brand-mark {
   width: 32px;
   height: 32px;
-  border-radius: 10px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(140deg, var(--accent), var(--accent-2));
-  box-shadow: 0 6px 16px -7px rgba(79, 70, 229, 0.9);
   flex: none;
+  border-radius: 9px;
+  box-shadow: 0 8px 18px -8px rgba(99, 102, 241, 0.85);
 }
 
-.brand-mark svg {
-  width: 15px;
-  height: 15px;
-  fill: #fff;
+.wordmark {
+  font-weight: 700;
+  letter-spacing: -0.032em;
+}
+
+.wordmark em {
+  font-style: normal;
 }
 
 /* ═══ Marketing shell ═══════════════════════════════════════ */

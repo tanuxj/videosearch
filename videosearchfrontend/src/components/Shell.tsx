@@ -1,17 +1,17 @@
 import type { ReactNode } from 'react'
 import { Link, useRoute } from '../lib/router'
 import { initials, useAuth } from '../lib/auth'
-import { GridIcon, PlayIcon, SearchIcon, SignOutIcon } from './Icons'
+import { GridIcon, SearchIcon, SignOutIcon } from './Icons'
+import { LogoMark, Wordmark } from './Logo'
 
-export const APP_NAME: string = import.meta.env.VITE_APP_NAME || 'VideoSearch'
+export const APP_NAME: string =
+  import.meta.env.VITE_APP_NAME || 'SearchInVideo'
 
 export function Brand({ to = '/' }: { to?: string }) {
   return (
     <Link to={to} className="brand" aria-label={`${APP_NAME} home`}>
-      <span className="brand-mark">
-        <PlayIcon />
-      </span>
-      <span>{APP_NAME}</span>
+      <LogoMark className="brand-mark" />
+      <Wordmark name={APP_NAME} />
     </Link>
   )
 }
