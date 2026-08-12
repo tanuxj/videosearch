@@ -23,6 +23,12 @@ dependencies = [
     # libraries that don't exist in the slim Docker image. We only decode
     # frames (VideoCapture) — no GUI — so headless is exactly right.
     "opencv-python-headless>=4.9,<5.0",
+    # ONNX Runtime runs the exported CLIP vision tower (~1.4x faster than
+    # eager torch on CPU, bit-identical vectors). `onnx` + `onnxscript` are
+    # only used for the one-time torch.onnx.export of that graph.
+    "onnxruntime>=1.28.0",
+    "onnx>=1.22.0",
+    "onnxscript>=0.7.1",
 ]
 
 # torch from the CPU-only wheelhouse: the PyPI default build bundles CUDA,

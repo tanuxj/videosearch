@@ -43,7 +43,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async def _prewarm() -> None:
             started = time.perf_counter()
             try:
-                await asyncio.to_thread(embedder.load)
+                # Also exports + loads the ONNX vision session when enabled,
+                # so the one-time ~30s export never lands on a user request.
+                await asyncio.to_thread(embedder.prewarm)
                 logger.info("CLIP model ready in %.1fs", time.perf_counter() - started)
             except Exception:  # noqa: BLE001 - degraded, not fatal
                 logger.exception("CLIP model preload failed; will retry on first use")
