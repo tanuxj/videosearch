@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -11,6 +13,7 @@ from app.auth.routes import router as auth_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db import session as db_session
+from app.videos import maintenance
 from app.videos.routes import router as videos_router
 from app.videos.search import router as clip_search_router
 
@@ -29,7 +32,22 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # request.
     if await db_session.ping():
         logger.info("Database connection OK")
+
+    # Reconciles direct uploads whose client never confirmed them. Disabled
+    # under tests (they call the sweep directly) and when the interval is 0.
+    sweeper_stop = asyncio.Event()
+    sweeper: asyncio.Task[None] | None = None
+    if settings.pending_sweep_interval_minutes > 0 and settings.app_env != "test":
+        sweeper = asyncio.create_task(maintenance.sweeper_loop(sweeper_stop))
+
     yield
+
+    if sweeper is not None:
+        sweeper_stop.set()
+        sweeper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweeper
+
     await db_session.dispose()
     logger.info("%s shutting down", settings.app_name)
 

@@ -33,9 +33,7 @@ VECTOR_DIM = 512
 def clip_bytes(tmp_path_factory: pytest.TempPathFactory) -> bytes:
     """A 3-second 64x64 AVI: red, green, blue — one solid second each."""
     path = tmp_path_factory.mktemp("clips") / "scenes.avi"
-    writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64)
-    )
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64))
     # BGR values whose BGR→RGB conversion yields red, green, blue.
     colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
     for color in colors:

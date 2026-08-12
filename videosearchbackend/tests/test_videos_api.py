@@ -219,9 +219,7 @@ def test_stream_url_returns_signed_worker_url_when_configured(
     from app.videos import streaming
 
     # routes and streaming both read the same cached settings singleton.
-    monkeypatch.setattr(
-        streaming.settings, "stream_worker_base_url", "https://edge.example.com"
-    )
+    monkeypatch.setattr(streaming.settings, "stream_worker_base_url", "https://edge.example.com")
     monkeypatch.setattr(streaming.settings, "stream_signing_secret", "secret")
     monkeypatch.setattr(streaming.settings, "stream_url_ttl_seconds", 3600)
 

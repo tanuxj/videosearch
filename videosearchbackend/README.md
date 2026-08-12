@@ -94,6 +94,37 @@ Passwords are hashed with **Argon2id**. Login answers with an identical message
 and comparable timing whether or not the email exists, so it cannot be used to
 enumerate accounts.
 
+## Uploads
+
+Videos go **straight from the browser to R2** — no bytes pass through the API.
+
+```
+1. POST /videos/upload-url   → reserves a `pending` row, returns a presigned PUT
+2. PUT  <presigned url>      → browser → R2 directly (real progress via XHR)
+3. POST /videos/{id}/complete → API HEADs the object, records the real size,
+                                flips to `processing`, enqueues indexing
+```
+
+**Storage is the source of truth.** Step 3 is a latency optimisation, not
+evidence: the API verifies with `head_object` and takes the size from R2, never
+from the client. A PUT is atomic, so an object that exists is an upload that
+finished.
+
+**Abandoned uploads self-heal.** If the browser dies before step 3 (closed tab,
+lost network), a background sweep every `PENDING_SWEEP_INTERVAL_MINUTES`
+reconciles `pending` rows older than `PENDING_UPLOAD_TTL_MINUTES`: object
+present → promote and index, absent → drop the row.
+
+**Size limits.** A presigned PUT cannot cap the body, so the 512 MiB limit is
+enforced at `complete` — an oversized object is deleted along with its row.
+
+The multipart `POST /videos` endpoint still exists and is used automatically
+when the storage backend cannot presign (local disk in dev/tests) or by
+non-browser clients.
+
+⚠ The **bucket** must allow the frontend origin — see [`infra/README.md`](infra/README.md).
+Without it the browser blocks the PUT before it is sent.
+
 ## Database and migrations
 
 SQLAlchemy 2.0 (async, asyncpg) with Alembic.

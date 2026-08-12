@@ -45,9 +45,7 @@ def test_build_stream_url_returns_none_without_worker_config(
 
 
 def test_build_stream_url_mints_a_signed_url(monkeypatch) -> None:
-    monkeypatch.setattr(
-        streaming.settings, "stream_worker_base_url", "https://edge.example.com"
-    )
+    monkeypatch.setattr(streaming.settings, "stream_worker_base_url", "https://edge.example.com")
     monkeypatch.setattr(streaming.settings, "stream_signing_secret", "secret")
     monkeypatch.setattr(streaming.settings, "stream_url_ttl_seconds", 60)
 
@@ -59,9 +57,7 @@ def test_build_stream_url_mints_a_signed_url(monkeypatch) -> None:
 
 
 def test_build_stream_url_strips_trailing_slash_from_base(monkeypatch) -> None:
-    monkeypatch.setattr(
-        streaming.settings, "stream_worker_base_url", "https://edge.example.com/"
-    )
+    monkeypatch.setattr(streaming.settings, "stream_worker_base_url", "https://edge.example.com/")
     monkeypatch.setattr(streaming.settings, "stream_signing_secret", "secret")
 
     url = streaming.build_stream_url("owner/video.mp4")

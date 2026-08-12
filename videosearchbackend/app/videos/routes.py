@@ -1,8 +1,13 @@
 """Video routes: upload, list, status, stream, delete.
 
-Upload is the entry point of the indexing pipeline: it stores the file, opens
-a `processing` video row, and enqueues the background job that extracts and
-embeds frames.
+Two upload paths, both ending in the same indexing pipeline:
+
+* **Direct to storage (preferred).** `POST /videos/upload-url` reserves a
+  `pending` row and returns a presigned PUT; the browser sends the bytes
+  straight to R2; `POST /videos/{id}/complete` verifies the object landed and
+  starts indexing. No video bytes pass through the API.
+* **Multipart through the API (fallback).** `POST /videos` — used when the
+  storage backend cannot presign (local disk) or by non-browser clients.
 """
 
 import uuid
@@ -16,7 +21,13 @@ from app.auth.schemas import MessageResponse
 from app.core.config import get_settings
 from app.videos import pipeline
 from app.videos import service as videos_service
-from app.videos.schemas import StreamUrlOut, VideoListOut, VideoOut
+from app.videos.schemas import (
+    StreamUrlOut,
+    UploadUrlIn,
+    UploadUrlOut,
+    VideoListOut,
+    VideoOut,
+)
 from app.videos.storage import storage
 from app.videos.streaming import build_stream_url
 
@@ -81,6 +92,105 @@ async def upload_video(
 
     # Fire-and-forget: the response goes out immediately with status
     # `processing`, and indexing runs to completion in the background.
+    if settings.index_on_upload:
+        background_tasks.add_task(pipeline.index_video, video.id)
+    return VideoOut.model_validate(video)
+
+
+@router.post(
+    "/upload-url",
+    response_model=UploadUrlOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Reserve a video and get a direct upload URL",
+    description=(
+        "Creates a `pending` video row and returns a short-lived presigned PUT "
+        "URL. The client uploads the bytes straight to object storage, then "
+        "calls `POST /videos/{id}/complete`. If this deployment cannot presign "
+        "(local-disk storage), `direct` is false and the client should fall "
+        "back to the multipart `POST /videos` endpoint."
+    ),
+    responses={
+        415: {"description": "Unsupported file type"},
+        413: {"description": "File too large"},
+    },
+)
+async def create_upload_url(
+    user: CurrentUser,
+    db: DbSession,
+    payload: UploadUrlIn,
+) -> UploadUrlOut:
+    try:
+        pending = await videos_service.create_pending_upload(
+            db,
+            owner_id=user.id,
+            filename=payload.filename,
+            size_bytes=payload.size_bytes,
+        )
+    except videos_service.DirectUploadUnavailable:
+        # Not an error: the client retries through the multipart endpoint.
+        return UploadUrlOut(direct=False)
+    except videos_service.UnsupportedFileType as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported file type: {exc.args[0] or 'unknown'}. "
+            "Allowed: mp4, mov, webm, mkv, avi, m4v",
+        ) from exc
+    except videos_service.FileTooLarge as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="File exceeds the 512 MiB upload limit",
+        ) from exc
+
+    return UploadUrlOut(
+        direct=True,
+        video_id=pending.video.id,
+        upload_url=pending.upload_url,
+        content_type=pending.content_type,
+        expires_in=pending.expires_in,
+    )
+
+
+@router.post(
+    "/{video_id}/complete",
+    response_model=VideoOut,
+    summary="Confirm a direct upload and start indexing",
+    description=(
+        "Verifies the object actually exists in storage — the client's word is "
+        "only a hint — records the real size, and enqueues the indexing job. "
+        "Safe to skip: the background sweep reconciles pending uploads anyway."
+    ),
+    responses={
+        404: {"description": "Video not found"},
+        409: {"description": "Upload not found in storage, or already completed"},
+        413: {"description": "Uploaded object exceeds the size limit"},
+    },
+)
+async def complete_upload(
+    user: CurrentUser,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
+    video_id: uuid.UUID,
+) -> VideoOut:
+    try:
+        video = await videos_service.complete_upload(db, owner_id=user.id, video_id=video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+    except videos_service.UploadNotCompleted as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No uploaded file found for this video yet",
+        ) from exc
+    except videos_service.UploadAlreadyCompleted as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This upload was already completed (status: {exc.args[0]})",
+        ) from exc
+    except videos_service.FileTooLarge as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Uploaded file exceeds the 512 MiB limit and was discarded",
+        ) from exc
+
     if settings.index_on_upload:
         background_tasks.add_task(pipeline.index_video, video.id)
     return VideoOut.model_validate(video)

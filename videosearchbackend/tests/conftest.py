@@ -126,6 +126,12 @@ def _schema() -> None:
             # pgvector column with an HNSW index.
             await connection.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
             await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            # Rebuild from scratch. `create_all` skips tables that already
+            # exist, so a schema left over from an older revision of the models
+            # would silently persist — and fail in ways that look like app bugs
+            # (e.g. a CHECK constraint missing a status added since). Safe
+            # because we only reach here when the database holds no data.
+            await connection.run_sync(Base.metadata.drop_all)
             await connection.run_sync(Base.metadata.create_all)
 
     async def drop() -> None:

@@ -1,8 +1,8 @@
 """Video library and frame index tables.
 
 * ``videos`` — one row per uploaded video, owned by a user. `status` tracks
-  the indexing pipeline (`processing` → `ready`, or `failed` with an error
-  message). `storage_key` is the object key inside the R2 bucket (or the
+  the upload and indexing pipeline (`pending` → `processing` → `ready`, or
+  `failed` with an error message). `storage_key` is the object key inside the R2 bucket (or the
   relative path under the local upload dir when R2 is not configured).
   `frames_total` / `frames_indexed` let the frontend show real progress.
 * ``frames`` — one row per indexed frame, holding the CLIP image embedding
@@ -36,7 +36,10 @@ from app.db.base import Base, TimestampMixin
 # CLIP (clip-ViT-B-32) embeds both frames and text into this many dimensions.
 EMBEDDING_DIM = 512
 
-VIDEO_STATUSES = ("processing", "ready", "failed")
+# `pending` = a row reserved for a direct-to-R2 upload that has not been
+# confirmed yet. It becomes `processing` once the object is verified present
+# in the bucket, or is swept away if the upload never lands.
+VIDEO_STATUSES = ("pending", "processing", "ready", "failed")
 
 
 class Video(Base, TimestampMixin):

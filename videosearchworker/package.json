@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "cors:list": "wrangler r2 bucket cors list searchinvideo",
+    "cors:set": "wrangler r2 bucket cors set searchinvideo --file ../videosearchbackend/infra/r2-cors.json --force",
+    "buckets": "wrangler r2 bucket list"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260811.1",

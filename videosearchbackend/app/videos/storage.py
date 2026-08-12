@@ -106,6 +106,64 @@ class Storage:
                 while chunk := source.read(1024 * 1024):
                     target.write(chunk)
 
+    @property
+    def supports_direct_upload(self) -> bool:
+        """True when clients can PUT straight to storage with a signed URL.
+
+        Only the R2 backend can: there is nothing to presign for local disk,
+        so those deployments keep using the multipart upload endpoint.
+        """
+        return self._client is not None
+
+    def presign_put(self, key: str, content_type: str, expires_in: int) -> str:
+        """A short-lived URL the browser can PUT this object's bytes to.
+
+        Purely local computation — signing does not call R2. The signature
+        covers the bucket, key, method and `Content-Type`, so the client must
+        send exactly the same content type or the PUT is rejected.
+
+        A presigned PUT cannot cap the body size; callers must verify the real
+        size with `head()` afterwards.
+        """
+        if self._client is None:
+            raise RuntimeError("presign_put requires the r2 storage backend")
+        assert self._bucket is not None
+        return self._client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": self._bucket,
+                "Key": key,
+                "ContentType": content_type,
+            },
+            ExpiresIn=expires_in,
+        )
+
+    def head(self, key: str) -> dict | None:
+        """Object metadata (`size`, `content_type`), or None if absent.
+
+        This is how the backend learns a direct upload actually landed: a PUT
+        is atomic, so an object that exists is an object that finished
+        uploading. Never trust the client's claim over this.
+        """
+        if self._client is not None:
+            assert self._bucket is not None
+            try:
+                response = self._client.head_object(Bucket=self._bucket, Key=key)
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code")
+                if code in ("404", "NoSuchKey", "NotFound"):
+                    return None
+                raise
+            return {
+                "size": int(response.get("ContentLength", 0)),
+                "content_type": response.get("ContentType"),
+            }
+
+        path = self._local_path(key)
+        if not path.is_file():
+            return None
+        return {"size": path.stat().st_size, "content_type": None}
+
     def delete(self, key: str) -> None:
         """Remove an object. Silent when it does not exist."""
         if self._client is not None:

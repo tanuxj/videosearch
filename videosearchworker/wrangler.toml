@@ -20,4 +20,4 @@ compatibility_date = "2025-08-01"
 # Same bucket the FastAPI backend writes to (R2_BUCKET_NAME).
 [[r2_buckets]]
 binding = "VIDEO_BUCKET"
-bucket_name = "safeguard"
+bucket_name = "searchinvideo"

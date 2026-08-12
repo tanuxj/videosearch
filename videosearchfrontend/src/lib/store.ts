@@ -126,11 +126,56 @@ export async function getVideo(videoId: string): Promise<VideoRecord | null> {
   }
 }
 
+type UploadTicket = {
+  direct: boolean
+  video_id?: string
+  upload_url?: string
+  method?: string
+  content_type?: string
+  expires_in?: number
+}
+
 /**
- * Create a video on the server. The multipart body is sent directly (with the
- * bearer token) because `apiFetch` assumes JSON.
+ * PUT a file straight to object storage, reporting real progress.
+ *
+ * XHR rather than `fetch` on purpose: `fetch` cannot report *upload* progress,
+ * so a fetch-based uploader can only jump 0 → 100%. `xhr.upload.onprogress`
+ * gives byte-accurate feedback while the transfer is happening.
+ *
+ * No Authorization header and no credentials: the URL is already a signed
+ * capability, and extra headers would invalidate the signature.
  */
-export async function createVideoApi(
+function putWithProgress(
+  uploadUrl: string,
+  file: File,
+  contentType: string,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', uploadUrl, true)
+    // Must match the content type the URL was signed with, exactly.
+    xhr.setRequestHeader('Content-Type', contentType)
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(event.loaded, event.total)
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve()
+      else reject(new ApiError(xhr.status, `Storage rejected the upload (${xhr.status})`))
+    }
+    // A network-level failure here is almost always the bucket's CORS rules,
+    // since the browser blocks the request before it is sent.
+    xhr.onerror = () =>
+      reject(new Error('Could not reach storage — check the bucket CORS configuration'))
+    xhr.onabort = () => reject(new Error('Upload cancelled'))
+
+    xhr.send(file)
+  })
+}
+
+/** The original path: multipart through the API. Used when direct upload is off. */
+async function uploadThroughApi(
   file: File,
   onProgress?: (loaded: number, total: number) => void,
 ): Promise<VideoRecord> {
@@ -151,6 +196,52 @@ export async function createVideoApi(
   const video = (await response.json()) as ApiVideo
   onProgress?.(file.size, file.size)
   return toRecord(video)
+}
+
+/**
+ * Upload a video.
+ *
+ * Preferred path — the bytes never touch the API:
+ *   1. `POST /videos/upload-url` reserves a row and returns a presigned PUT
+ *   2. the browser PUTs the file straight to storage
+ *   3. `POST /videos/{id}/complete` verifies it landed and starts indexing
+ *
+ * Falls back to multipart-through-the-API when the backend cannot presign
+ * (local-disk storage) or does not know the endpoint yet.
+ */
+export async function createVideoApi(
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<VideoRecord> {
+  let ticket: UploadTicket | null = null
+  try {
+    ticket = await apiFetch<UploadTicket>('/api/v1/videos/upload-url', {
+      method: 'POST',
+      body: JSON.stringify({ filename: file.name, size_bytes: file.size }),
+    })
+  } catch (error) {
+    // Rejections about the file itself are final — don't retry them as a
+    // multipart upload that would fail the same way.
+    if (error instanceof ApiError && (error.status === 413 || error.status === 415)) {
+      throw error
+    }
+    ticket = null
+  }
+
+  if (ticket?.direct && ticket.upload_url && ticket.video_id) {
+    await putWithProgress(
+      ticket.upload_url,
+      file,
+      ticket.content_type || file.type || 'application/octet-stream',
+      onProgress,
+    )
+    const video = await apiFetch<ApiVideo>(`/api/v1/videos/${ticket.video_id}/complete`, {
+      method: 'POST',
+    })
+    return toRecord(video)
+  }
+
+  return uploadThroughApi(file, onProgress)
 }
 
 async function readError(response: Response, fallback: string): Promise<string> {

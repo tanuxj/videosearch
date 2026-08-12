@@ -82,6 +82,18 @@ class Settings(BaseSettings):
     # Local fallback storage for when R2 is not configured.
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
 
+    # ── Direct-to-storage uploads ───────────────────────────────
+    # The browser PUTs video bytes straight to R2 with a presigned URL, so
+    # uploads never pass through the API. Only possible on the R2 backend;
+    # local-disk deployments keep using the multipart endpoint.
+    # How long a presigned upload URL stays valid (seconds).
+    upload_url_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+    # A `pending` row older than this is reconciled against storage: promoted
+    # if the object arrived, deleted if it never did.
+    pending_upload_ttl_minutes: int = Field(default=30, ge=1, le=1440)
+    # How often the reconcile sweep runs. 0 disables the background sweeper.
+    pending_sweep_interval_minutes: int = Field(default=10, ge=0, le=1440)
+
     # ── Edge streaming (Cloudflare Worker) ──────────────────────
     # When `stream_worker_base_url` is set, `GET /videos/{id}/stream-url`
     # returns a short-lived HMAC-signed URL served by the edge Worker
