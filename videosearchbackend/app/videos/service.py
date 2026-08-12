@@ -42,6 +42,19 @@ class FileTooLarge(VideoError):
     pass
 
 
+class UploadNotComplete(VideoError):
+    """A presigned upload was reserved but its bytes never landed."""
+
+
+class UploadSizeMismatch(VideoError):
+    """The uploaded object's size does not match what was declared."""
+
+    def __init__(self, *, expected: int, actual: int) -> None:
+        super().__init__(f"expected {expected} bytes, got {actual}")
+        self.expected = expected
+        self.actual = actual
+
+
 def _safe_name(filename: str) -> str:
     """Basename only, truncated — the browser may send any string."""
     return Path(filename or "video.mp4").name[:255]
@@ -49,6 +62,20 @@ def _safe_name(filename: str) -> str:
 
 def _extension(filename: str) -> str:
     return Path(filename or "").suffix.lower()
+
+
+def validate_upload(filename: str, size_bytes: int) -> str:
+    """Reject unsupported extensions and oversize files; return the ext.
+
+    Shared by the multipart upload and the presigned-upload reservation so
+    both entry points enforce exactly the same rules.
+    """
+    ext = _extension(filename)
+    if ext not in ALLOWED_EXTENSIONS:
+        raise UnsupportedFileType(ext)
+    if size_bytes > MAX_UPLOAD_BYTES:
+        raise FileTooLarge(size_bytes)
+    return ext
 
 
 def object_key(owner_id: uuid.UUID, video_id: uuid.UUID, ext: str) -> str:
@@ -80,14 +107,8 @@ async def create_video(
     size cap rejects after the transfer, not during it. True streaming
     limits would need manual body handling — fine for an MVP.
     """
-    ext = _extension(filename)
-    if ext not in ALLOWED_EXTENSIONS:
-        raise UnsupportedFileType(ext)
-    if size_bytes > MAX_UPLOAD_BYTES:
-        raise FileTooLarge(size_bytes)
-
-    video_id = uuid.uuid4()
-    key = object_key(owner_id, video_id, ext)
+    ext = validate_upload(filename, size_bytes)
+    key = object_key(owner_id, uuid.uuid4(), ext)
 
     # Stage to local disk before uploading, not after: boto3 closes the file
     # object it reads from, so the bytes are unrecoverable once the upload has
@@ -128,6 +149,70 @@ async def create_video(
     await db.refresh(video)
     logger.info("Video uploaded: %s (%d bytes, status=processing)", video.id, size_bytes)
     return video, staged_path
+
+
+async def create_pending_video(
+    db: AsyncSession,
+    *,
+    owner_id: uuid.UUID,
+    filename: str,
+    size_bytes: int,
+) -> Video:
+    """Reserve a `processing` video row before its bytes arrive.
+
+    Presigned-upload flow: the API mints a PUT URL pointing straight at the
+    object key this row owns, and the browser uploads the file itself — the
+    API never buffers a large multipart body. The caller is expected to hand
+    the row over to `complete_pending_video` once the object lands.
+    """
+    validate_upload(filename, size_bytes)
+
+    video_id = uuid.uuid4()
+    key = object_key(owner_id, video_id, _extension(filename))
+    video = Video(
+        owner_id=owner_id,
+        name=_safe_name(filename),
+        size_bytes=size_bytes,
+        status="processing",
+        storage_key=key,
+    )
+    db.add(video)
+    await db.commit()
+    await db.refresh(video)
+    logger.info(
+        "Video reserved for presigned upload: %s (%d bytes)",
+        video.id,
+        size_bytes,
+    )
+    return video
+
+
+async def complete_pending_video(
+    db: AsyncSession,
+    *,
+    owner_id: uuid.UUID,
+    video_id: uuid.UUID,
+    expected_bytes: int,
+) -> Video:
+    """Verify a presigned upload landed and finish the reservation.
+
+    Checks the object really exists in storage and matches the declared
+    size before the pipeline may start — a client that mints a URL but never
+    PUTs the file (or lies about its size) fails fast instead of leaving the
+    row stuck in `processing`.
+
+    Returns the confirmed video; the route layer then starts indexing.
+    """
+    video = await get_video(db, owner_id, video_id)
+
+    actual = await run_in_threadpool(storage.object_size, video.storage_key)
+    if actual is None:
+        raise UploadNotComplete("file was never uploaded")
+    if actual != expected_bytes:
+        raise UploadSizeMismatch(expected=expected_bytes, actual=actual)
+
+    logger.info("Presigned upload confirmed: %s (%d bytes)", video.id, actual)
+    return video
 
 
 async def list_videos(db: AsyncSession, owner_id: uuid.UUID) -> list[Video]:

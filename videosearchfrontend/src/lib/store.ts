@@ -126,14 +126,98 @@ export async function getVideo(videoId: string): Promise<VideoRecord | null> {
   }
 }
 
+type PresignUpload = {
+  video: ApiVideo
+  upload_url: string | null
+  expires_in: number
+}
+
+type CompleteUpload = {
+  video: ApiVideo
+  message: string
+}
+
 /**
- * Create a video on the server. The multipart body is sent directly (with the
- * bearer token) because `apiFetch` assumes JSON.
+ * PUT a file to a presigned URL with real upload progress.
+ *
+ * `fetch` cannot report upload progress, so this uses XHR for the body
+ * transfer only — the progress callback drives the dialog's progress bar
+ * while the browser streams the bytes straight to R2.
+ */
+function putFile(
+  url: string,
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', url)
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(event.loaded, event.total)
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve()
+      else reject(new ApiError(xhr.status, `Upload to storage failed (${xhr.status})`))
+    }
+    xhr.onerror = () => reject(new ApiError(0, 'Upload to storage failed — check your connection'))
+    xhr.send(file)
+  })
+}
+
+/**
+ * Create a video on the server.
+ *
+ * Fast path: the API reserves a `processing` row and hands back a presigned
+ * PUT URL, the browser uploads the file straight to R2 (no API buffering, no
+ * double hop), then calls `complete` to start indexing.
+ *
+ * Fallback: when the backend cannot presign (local storage), upload via the
+ * classic multipart endpoint so dev/test setups keep working unchanged.
  */
 export async function createVideoApi(
   file: File,
   onProgress?: (loaded: number, total: number) => void,
 ): Promise<VideoRecord> {
+  // Fast path: presigned direct upload. 409 here means storage can't presign
+  // (e.g. local dev) — fall through to multipart. Other errors are real
+  // failures (unsupported type, too large) and must surface to the user.
+  let presigned: PresignUpload | null = null
+  try {
+    const data = await apiFetch<PresignUpload>('/api/v1/videos/presign', {
+      method: 'POST',
+      body: JSON.stringify({
+        filename: file.name,
+        size_bytes: file.size,
+        content_type: file.type || 'application/octet-stream',
+      }),
+    })
+    presigned = data.upload_url ? data : null
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      presigned = null
+    } else {
+      throw error
+    }
+  }
+
+  if (presigned && presigned.upload_url) {
+    try {
+      await putFile(presigned.upload_url, file, onProgress)
+      const completed = await apiFetch<CompleteUpload>(
+        `/api/v1/videos/${presigned.video.id}/complete`,
+        { method: 'POST' },
+      )
+      return toRecord(completed.video)
+    } catch (error) {
+      // The transfer or the confirmation failed — don't leave a zombie
+      // `processing` row (and its orphaned object) behind.
+      void apiFetch(`/api/v1/videos/${presigned.video.id}`, { method: 'DELETE' }).catch(() => {})
+      throw error
+    }
+  }
+
+  // Fallback: multipart through the API (local dev storage / older backend).
   const form = new FormData()
   form.append('file', file)
 

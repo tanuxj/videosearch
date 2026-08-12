@@ -75,6 +75,50 @@ class Storage:
     def backend(self) -> str:
         return self._backend
 
+    @property
+    def presign_enabled(self) -> bool:
+        """True when the browser can PUT files straight to storage.
+
+        Only the R2 backend can hand out presigned URLs — local disk has no
+        endpoint for a browser to upload to, so clients must fall back to
+        the multipart path.
+        """
+        return self._client is not None
+
+    def presign_put(self, key: str, content_type: str | None, expires_in: int) -> str | None:
+        """A short-lived URL the browser can PUT an object straight to.
+
+        Returns None when presigned uploads are unavailable (local backend).
+        """
+        if self._client is None:
+            return None
+        assert self._bucket is not None
+        return self._client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": self._bucket,
+                "Key": key,
+                "ContentType": content_type or "application/octet-stream",
+            },
+            ExpiresIn=expires_in,
+        )
+
+    def object_size(self, key: str) -> int | None:
+        """Byte size of the stored object, or None when it does not exist."""
+        if self._client is not None:
+            assert self._bucket is not None
+            try:
+                head = self._client.head_object(Bucket=self._bucket, Key=key)
+                return int(head.get("ContentLength", 0))
+            except ClientError as exc:
+                status_code = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                code = exc.response.get("Error", {}).get("Code", "")
+                if status_code == 404 or code == "404":
+                    return None
+                raise
+        path = self._local_path(key)
+        return path.stat().st_size if path.exists() else None
+
     def _local_path(self, key: str) -> Path:
         """Resolve an object key under the upload root, refusing escapes."""
         root = self._root.resolve()

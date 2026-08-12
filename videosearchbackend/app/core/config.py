@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     # Tests force "local" so they never touch the real bucket.
     storage_backend: Literal["r2", "local", "auto"] = "auto"
 
+    # How long a presigned direct-upload URL stays valid (seconds). Large
+    # files can take a while to push from the browser to the bucket.
+    presign_url_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+
     # Local fallback storage for when R2 is not configured.
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
 

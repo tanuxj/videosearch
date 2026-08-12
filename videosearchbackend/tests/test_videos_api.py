@@ -276,3 +276,225 @@ def test_delete_someone_elses_video_is_404(client: TestClient) -> None:
     assert response.status_code == 404
     # The original owner still has it.
     assert client.get(f"/api/v1/videos/{video_id}", headers=mine).status_code == 200
+
+
+# ── Presigned direct upload ───────────────────────────────────────
+
+
+class _FakeS3:
+    """Minimal boto3 stand-in so presign/complete can be tested without R2."""
+
+    def __init__(self, *, content_length: int | None = None) -> None:
+        self._content_length = content_length
+        self.last_generated: tuple | None = None
+
+    def generate_presigned_url(self, method: str, Params: dict, ExpiresIn: int) -> str:
+        self.last_generated = (method, Params, ExpiresIn)
+        return "https://upload.example.com/fake?sig=abc"
+
+    def head_object(self, Bucket: str, Key: str) -> dict:
+        if self._content_length is None:
+            from botocore.exceptions import ClientError
+
+            raise ClientError(
+                {
+                    "Error": {"Code": "404"},
+                    "ResponseMetadata": {"HTTPStatusCode": 404},
+                },
+                "HeadObject",
+            )
+        return {"ContentLength": self._content_length}
+
+
+def _enable_presign(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_module,
+    *,
+    content_length: int | None = None,
+) -> _FakeS3:
+    """Make the storage singleton look like an R2 backend for one test."""
+    fake = _FakeS3(content_length=content_length)
+    monkeypatch.setattr(storage_module, "_client", fake)
+    monkeypatch.setattr(storage_module, "_bucket", "test-bucket")
+    return fake
+
+
+def test_presign_rejected_when_storage_cannot_presign(client: TestClient) -> None:
+    # Local storage backend (test default) has no presigned URLs.
+    headers = _auth_headers(client)
+    response = client.post(
+        "/api/v1/videos/presign",
+        headers=headers,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    )
+    assert response.status_code == 409
+    assert "multipart" in response.json()["detail"]
+
+
+def test_presign_requires_auth(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/videos/presign",
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("name", ["clip.txt", "notes.pdf"])
+def test_presign_rejects_unsupported_extensions(client: TestClient, name: str) -> None:
+    headers = _auth_headers(client)
+    response = client.post(
+        "/api/v1/videos/presign",
+        headers=headers,
+        json={"filename": name, "size_bytes": 8},
+    )
+    assert response.status_code == 415
+
+
+def test_presign_reserves_video_and_returns_upload_url(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import uuid as uuid_mod
+
+    from app.videos.storage import storage
+
+    fake = _enable_presign(monkeypatch, storage)
+    # Sign up directly so we know the owner id the key must be scoped to.
+    signup = client.post(
+        "/api/v1/auth/signup",
+        json={
+            "name": "Key Owner",
+            "email": "key.owner@example.com",
+            "password": SIGNUP["password"],
+        },
+    )
+    owner_id = signup.json()["user"]["id"]
+    token = signup.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.post(
+        "/api/v1/videos/presign",
+        headers=headers,
+        json={
+            "filename": "clip.mp4",
+            "size_bytes": len(FAKE_MP4),
+            "content_type": "video/mp4",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["upload_url"] == "https://upload.example.com/fake?sig=abc"
+    assert body["expires_in"] > 0
+    assert body["video"]["status"] == "processing"
+    assert body["video"]["name"] == "clip.mp4"
+    assert body["video"]["size_bytes"] == len(FAKE_MP4)
+
+    # The URL was minted for the object key the row owns: scoped to the
+    # owner's id, `.mp4` suffix, and both path segments are valid UUIDs —
+    # not something a client can inject into the bucket layout.
+    method, params, _ = fake.last_generated
+    assert method == "put_object"
+    assert params["ContentType"] == "video/mp4"
+    owner_part, video_file = params["Key"].split("/")
+    assert video_file.endswith(".mp4")
+    assert str(uuid_mod.UUID(owner_part)) == owner_id
+    # The per-video part is a fresh UUID (may differ from the row id — the
+    # key is opaque, the row stores it).
+    uuid_mod.UUID(video_file.removesuffix(".mp4"))
+
+    # The row exists server-side and shows in the user's list.
+    listing = client.get("/api/v1/videos", headers=headers).json()
+    assert [item["id"] for item in listing["items"]] == [body["video"]["id"]]
+
+
+def test_complete_confirms_upload_and_starts_indexing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos import pipeline, routes
+    from app.videos.storage import storage
+
+    _enable_presign(monkeypatch, storage, content_length=len(FAKE_MP4))
+    # Tests run with INDEX_ON_UPLOAD=false; this test exercises the indexing
+    # trigger, so turn it on just for the route under test.
+    monkeypatch.setattr(routes.settings, "index_on_upload", True)
+    started: list = []
+    monkeypatch.setattr(
+        pipeline,
+        "index_video",
+        lambda video_id, source_path=None: started.append(video_id),
+    )
+    headers = _auth_headers(client)
+
+    reserved = client.post(
+        "/api/v1/videos/presign",
+        headers=headers,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    ).json()
+    video_id = reserved["video"]["id"]
+
+    response = client.post(f"/api/v1/videos/{video_id}/complete", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["video"]["id"] == video_id
+    assert body["video"]["status"] == "processing"
+    assert "indexing" in body["message"].lower()
+    # The pipeline was handed the video id (background task consumed it).
+    # `started` collects UUID objects; compare string forms.
+    assert [str(item) for item in started] == [video_id]
+
+
+def test_complete_409_when_file_never_uploaded(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos.storage import storage
+
+    _enable_presign(monkeypatch, storage)
+    headers = _auth_headers(client)
+    video_id = client.post(
+        "/api/v1/videos/presign",
+        headers=headers,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    ).json()["video"]["id"]
+
+    response = client.post(f"/api/v1/videos/{video_id}/complete", headers=headers)
+    assert response.status_code == 409
+    assert "not been uploaded" in response.json()["detail"]
+
+
+def test_complete_409_on_size_mismatch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos.storage import storage
+
+    # Storage reports a different size than what was declared at presign.
+    _enable_presign(monkeypatch, storage, content_length=999)
+    headers = _auth_headers(client)
+    video_id = client.post(
+        "/api/v1/videos/presign",
+        headers=headers,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    ).json()["video"]["id"]
+
+    response = client.post(f"/api/v1/videos/{video_id}/complete", headers=headers)
+    assert response.status_code == 409
+    assert "does not match" in response.json()["detail"]
+
+
+def test_complete_someone_elses_video_is_404(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos.storage import storage
+
+    _enable_presign(monkeypatch, storage, content_length=len(FAKE_MP4))
+    mine = _auth_headers(client)
+    video_id = client.post(
+        "/api/v1/videos/presign",
+        headers=mine,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    ).json()["video"]["id"]
+    _auth_headers(client, email="other@example.com", name="Other Person")
+
+    response = client.post(
+        f"/api/v1/videos/{video_id}/complete",
+        headers={"Authorization": f"Bearer {_signin_other(client)}"},
+    )
+    assert response.status_code == 404

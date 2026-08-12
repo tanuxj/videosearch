@@ -37,3 +37,34 @@ class StreamUrlOut(BaseModel):
 
     url: str
     worker: bool
+
+
+class PresignUploadIn(BaseModel):
+    """Metadata for a direct-to-storage upload.
+
+    The file bytes never touch the API — it only validates the request and
+    mints a presigned PUT URL for the browser to upload to.
+    """
+
+    filename: str
+    size_bytes: int = Field(ge=0)
+    content_type: str | None = None
+
+
+class PresignUploadOut(BaseModel):
+    """A reserved video plus the URL to PUT its file at.
+
+    `upload_url` is None when the storage backend cannot presign (local
+    disk) — clients then fall back to the classic multipart upload.
+    """
+
+    video: VideoOut
+    upload_url: str | None
+    expires_in: int = Field(description="Seconds the upload URL stays valid.")
+
+
+class CompleteUploadOut(BaseModel):
+    """Result of confirming a presigned upload."""
+
+    video: VideoOut
+    message: str = "Upload confirmed — indexing started"
