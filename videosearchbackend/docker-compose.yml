@@ -7,8 +7,38 @@
 #   docker compose down           # stop (keeps the DB volume)
 #   docker compose down -v        # stop and delete the DB volume
 #
+# The `migrate` service runs `alembic upgrade head` on every `up` and the API
+# waits for it to exit 0, so a fresh volume (after `down -v`) is schema-ready
+# without a manual step.
+#
 # Credentials are read from the sibling .env file (POSTGRES_* vars).
 # ─────────────────────────────────────────────────────────────
+
+# Shared by the `migrate` and `backend` services so the Alembic run connects
+# with exactly the same credentials the API will use.
+x-backend-env: &backend_env
+  APP_ENV: development
+  HOST: 0.0.0.0
+  PORT: 3006
+  CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:5174,http://127.0.0.1:5174}"
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  # Pass through auth + object storage + edge streaming credentials so
+  # the container behaves like the local .env (R2, signed Worker URLs).
+  JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me}
+  R2_ENDPOINT_URL: ${R2_ENDPOINT_URL:-}
+  R2_BUCKET_NAME: ${R2_BUCKET_NAME:-}
+  R2_REGION: ${R2_REGION:-auto}
+  R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+  R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+  STREAM_WORKER_BASE_URL: ${STREAM_WORKER_BASE_URL:-}
+  STREAM_SIGNING_SECRET: ${STREAM_SIGNING_SECRET:-}
+  # Inside the compose network the DB host is the service name "db".
+  POSTGRES_HOST: db
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: ${POSTGRES_DB:-videosearch}
+  POSTGRES_USER: ${POSTGRES_USER:-videosearch}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-videosearch}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-videosearch}:${POSTGRES_PASSWORD:-videosearch}@db:5432/${POSTGRES_DB:-videosearch}
 
 services:
   db:
@@ -41,40 +71,35 @@ services:
       retries: 10
       start_period: 10s
 
+  # One-shot: brings the schema up to head before the API accepts traffic.
+  # Exits 0 when there is nothing to apply, so it is safe on every `up`.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: videosearch-migrate
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend_env
+    depends_on:
+      db:
+        condition: service_healthy
+
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: videosearch-backend
     restart: unless-stopped
-    environment:
-      APP_ENV: development
-      HOST: 0.0.0.0
-      PORT: 3006
-      # Inside the compose network the DB host is the service name "db".
-      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:5174,http://127.0.0.1:5174}"
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      # Pass through auth + object storage + edge streaming credentials so
-      # the container behaves like the local .env (R2, signed Worker URLs).
-      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me}
-      R2_ENDPOINT_URL: ${R2_ENDPOINT_URL:-}
-      R2_BUCKET_NAME: ${R2_BUCKET_NAME:-}
-      R2_REGION: ${R2_REGION:-auto}
-      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
-      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
-      STREAM_WORKER_BASE_URL: ${STREAM_WORKER_BASE_URL:-}
-      STREAM_SIGNING_SECRET: ${STREAM_SIGNING_SECRET:-}
-      POSTGRES_HOST: db
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-videosearch}
-      POSTGRES_USER: ${POSTGRES_USER:-videosearch}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-videosearch}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-videosearch}:${POSTGRES_PASSWORD:-videosearch}@db:5432/${POSTGRES_DB:-videosearch}
+    environment: *backend_env
     ports:
       - "${PORT:-3006}:3006"
     depends_on:
       db:
         condition: service_healthy
+      # Don't serve requests against a schema that hasn't been upgraded yet.
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:
