@@ -64,8 +64,13 @@ async def create_video(
     size_bytes: int,
     content_type: str | None,
     file,
-) -> Video:
+) -> tuple[Video, Path | None]:
     """Persist an uploaded file and register its video row.
+
+    Returns `(video, staged_path)`. `staged_path` is a local copy of the bytes
+    kept for the indexing pipeline so it does not download the object that was
+    just uploaded; it is None when the backend is already local. **The caller
+    owns that file** and must delete it (the pipeline does).
 
     Order matters: the file is written to storage *first*, then the row is
     inserted. If the insert fails the object is deleted again, so a failed
@@ -83,29 +88,46 @@ async def create_video(
 
     video_id = uuid.uuid4()
     key = object_key(owner_id, video_id, ext)
-    # UploadFile.file is a sync SpooledTemporaryFile; boto3 wants a file-like
-    # object, so the whole save runs on a worker thread.
-    await run_in_threadpool(storage.save_file, key, file, content_type)
 
-    video = Video(
-        owner_id=owner_id,
-        name=_safe_name(filename),
-        size_bytes=size_bytes,
-        status="processing",
-        storage_key=key,
-    )
-    db.add(video)
+    # Stage to local disk before uploading, not after: boto3 closes the file
+    # object it reads from, so the bytes are unrecoverable once the upload has
+    # run. Skipped for the local backend, where the stored file is already a
+    # readable local path.
+    staged_path: Path | None = None
+    if storage.backend == "r2":
+        staged_path = await run_in_threadpool(storage.spill_to_temp, file, ext)
+
     try:
-        await db.commit()
+        if staged_path is not None:
+            await run_in_threadpool(storage.save_path, key, staged_path, content_type)
+        else:
+            # UploadFile.file is a sync SpooledTemporaryFile; boto3 wants a
+            # file-like object, so the whole save runs on a worker thread.
+            await run_in_threadpool(storage.save_file, key, file, content_type)
+
+        video = Video(
+            owner_id=owner_id,
+            name=_safe_name(filename),
+            size_bytes=size_bytes,
+            status="processing",
+            storage_key=key,
+        )
+        db.add(video)
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            # Don't leave a file behind with no row pointing at it.
+            await run_in_threadpool(storage.delete, key)
+            raise
     except Exception:
-        await db.rollback()
-        # Don't leave a file behind with no row pointing at it.
-        await run_in_threadpool(storage.delete, key)
+        if staged_path is not None:
+            staged_path.unlink(missing_ok=True)
         raise
 
     await db.refresh(video)
     logger.info("Video uploaded: %s (%d bytes, status=processing)", video.id, size_bytes)
-    return video
+    return video, staged_path
 
 
 async def list_videos(db: AsyncSession, owner_id: uuid.UUID) -> list[Video]:

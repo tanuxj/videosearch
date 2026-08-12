@@ -28,6 +28,9 @@ if _TEST_DB_URL:
 os.environ.setdefault("STORAGE_BACKEND", "local")
 os.environ.setdefault("UPLOAD_DIR", os.path.join(os.path.dirname(__file__), ".test-uploads"))
 os.environ.setdefault("INDEX_ON_UPLOAD", "false")
+# Startup would otherwise preload the real CLIP weights (~1.2 GB) as soon as a
+# TestClient enters the app's lifespan.
+os.environ.setdefault("PREWARM_CLIP_MODEL", "false")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

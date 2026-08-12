@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     # CLIP variant used to embed frames and prompts. Hugging Face model id
     # for sentence-transformers; downloads to the HF cache on first use.
     clip_model_name: str = "clip-ViT-B-32"
+    # Load CLIP at startup on a background thread rather than on the first
+    # upload/search. Tests turn this off so they don't pull ~1.2 GB of weights.
+    prewarm_clip_model: bool = True
     # Start the indexing job automatically on upload. Tests flip this off
     # so uploads stay `processing` until the test runs the pipeline itself.
     index_on_upload: bool = True

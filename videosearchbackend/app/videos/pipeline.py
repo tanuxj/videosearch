@@ -18,6 +18,7 @@ upload. Design notes:
 
 import asyncio
 import logging
+import time
 import uuid
 from pathlib import Path
 
@@ -56,64 +57,88 @@ def _probe(cap) -> tuple[float, int]:
     return float(fps), frames
 
 
-def _read_sampled_chunk(
-    cap, start_frame: int, step: int, count: int, fps: float
-) -> tuple[list[np.ndarray], list[float], int]:
-    """Read up to `count` sampled frames from `start_frame`, stepping by `step`.
+def probe_file(path: Path) -> tuple[float, float, int]:
+    """(duration_seconds, sample_step, expected_sample_count) for a video file.
 
-    Returns (rgb_frames, timestamps, next_frame_index). Seeking per chunk
-    keeps memory flat for arbitrarily long videos.
+    Cheap — reads container metadata only, no decoding. Run before indexing
+    starts so ``frames_total`` is known up front and the status poll can show
+    real progress instead of 0/0.
     """
-    rgb_frames: list[np.ndarray] = []
-    timestamps: list[float] = []
-    frame_index = start_frame
-    read = 0
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video file: {path.name}")
+    try:
+        fps, total_frames = _probe(cap)
+    finally:
+        cap.release()
 
-    while read < count:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        ok, frame = cap.read()
-        if not ok:
-            break
-        rgb_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        timestamps.append(frame_index / fps)
-        frame_index += step
-        read += 1
-
-    return rgb_frames, timestamps, frame_index
+    step = max(1, round(fps * settings.frame_interval_seconds))
+    duration = total_frames / fps if total_frames else 0.0
+    # Ceiling, not floor: frame 0 is sampled, so a 429-frame clip at step 30
+    # yields 15 samples (0, 30, … 420) — flooring reported 14 and made the
+    # progress bar read 15/14.
+    expected = -(-total_frames // step) if total_frames else 0
+    return duration, step, expected
 
 
-def _process_video(path: Path, emit) -> tuple[float, int, int]:
+def _process_video(path: Path, step: int, emit) -> tuple[int, float, float]:
     """Worker-thread body: decode + embed + emit chunks.
 
-    `emit(timestamps, embeddings)` is called on the worker thread with one
-    chunk at a time; the async caller bridges it onto the event loop.
-    Returns (duration_seconds, total_frames, frames_indexed).
+    Returns (frames_indexed, decode_seconds, embed_seconds) — the split is
+    logged on completion so a slow index can be attributed without a profiler.
+
+    `emit(timestamps, embeddings)` is called on the worker thread with one chunk
+    at a time; the async caller bridges it onto the event loop.
+
+    Decoding is a single forward pass: ``grab()`` advances the demuxer without
+    decoding and only sampled frames are ``retrieve()``d. Seeking per frame
+    instead (``CAP_PROP_POS_FRAMES``) forces a re-decode from the preceding
+    keyframe on every read, which measured ~2x slower even on a keyframe-dense
+    file and far worse on normal H.264.
     """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video file: {path.name}")
 
     try:
-        fps, total_frames = _probe(cap)
-        step = max(1, round(fps * settings.frame_interval_seconds))
-        duration = total_frames / fps if total_frames else 0.0
-        expected = total_frames // step if total_frames else 0
-
+        fps, _ = _probe(cap)
+        frames: list[np.ndarray] = []
+        timestamps: list[float] = []
         indexed = 0
         frame_index = 0
-        while True:
-            rgb_frames, timestamps, frame_index = _read_sampled_chunk(
-                cap, frame_index, step, _EMBED_CHUNK, fps
-            )
-            if not rgb_frames:
-                break
-            embeddings = embedder.embed_images(rgb_frames)
-            emit(timestamps, embeddings)
-            indexed += len(timestamps)
-            if len(timestamps) < _EMBED_CHUNK:
-                break
+        embed_seconds = 0.0
+        started = time.perf_counter()
 
-        return duration, expected, indexed
+        def flush() -> tuple[int, float]:
+            embed_started = time.perf_counter()
+            embeddings = embedder.embed_images(frames)
+            elapsed = time.perf_counter() - embed_started
+            emit(list(timestamps), embeddings)
+            count = len(timestamps)
+            frames.clear()
+            timestamps.clear()
+            return count, elapsed
+
+        while cap.grab():
+            if frame_index % step == 0:
+                ok, frame = cap.retrieve()
+                if not ok:
+                    break
+                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                timestamps.append(frame_index / fps)
+                if len(frames) == _EMBED_CHUNK:
+                    count, elapsed = flush()
+                    indexed += count
+                    embed_seconds += elapsed
+            frame_index += 1
+
+        if frames:
+            count, elapsed = flush()
+            indexed += count
+            embed_seconds += elapsed
+
+        total = time.perf_counter() - started
+        return indexed, max(0.0, total - embed_seconds), embed_seconds
     finally:
         cap.release()
 
@@ -136,20 +161,37 @@ async def _insert_chunk(
     await db.commit()
 
 
-async def index_video(video_id: uuid.UUID) -> None:
+async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> None:
     """Run the full indexing pipeline for one video. Idempotent per video.
 
     Safe to call more than once: a video that is not ``processing`` is left
     alone. Runs its own session so it is independent of any request.
+
+    `source_path` is a local copy of the bytes the upload handler already had in
+    hand. Passing it skips re-downloading the object that was just uploaded —
+    for the R2 backend that round trip measured ~0.36 s/MB. Ownership transfers
+    to this function: the file is deleted when indexing finishes or fails.
     """
-    local_path: Path | None = None
+    local_path: Path | None = source_path
+    # Only remove files we own — for the local backend `get_local_path` returns
+    # the stored object itself, which must survive.
+    owns_local_file = source_path is not None
     try:
         async with SessionFactory() as db:
             video = await db.get(Video, video_id)
             if video is None or video.status != "processing":
                 return
 
-            local_path = await asyncio.to_thread(storage.get_local_path, video.storage_key)
+            if local_path is None or not local_path.exists():
+                local_path = await asyncio.to_thread(storage.get_local_path, video.storage_key)
+                owns_local_file = storage.backend == "r2"
+
+            # Publish the denominator before any embedding work so the frontend
+            # poll shows progress from the first tick.
+            duration, step, expected = await asyncio.to_thread(probe_file, local_path)
+            video.duration_seconds = duration
+            video.frames_total = expected
+            await db.commit()
 
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
@@ -159,37 +201,48 @@ async def index_video(video_id: uuid.UUID) -> None:
 
             def worker() -> None:
                 try:
-                    stats = _process_video(local_path, emit)
+                    stats = _process_video(local_path, step, emit)
                     loop.call_soon_threadsafe(queue.put_nowait, (_DONE, stats))
                 except Exception as exc:  # pragma: no cover - surfaced via queue
                     loop.call_soon_threadsafe(queue.put_nowait, (_ERROR, exc))
 
             # Worker runs on a thread; consumer runs here on the loop.
+            started = time.perf_counter()
             worker_task = asyncio.create_task(asyncio.to_thread(worker))
 
-            duration = total_frames = 0.0
+            decode_seconds = embed_seconds = db_seconds = 0.0
             while True:
                 kind, *payload = await queue.get()
                 if kind == _CHUNK:
                     timestamps, embeddings = payload
+                    insert_started = time.perf_counter()
                     await _insert_chunk(db, video, timestamps, embeddings)
+                    db_seconds += time.perf_counter() - insert_started
                 elif kind == _DONE:
-                    duration, total_frames, _ = payload[0]
+                    _, decode_seconds, embed_seconds = payload[0]
                     break
                 elif kind == _ERROR:
                     raise payload[0]
 
             await worker_task
+            wall_seconds = time.perf_counter() - started
 
-            video.duration_seconds = duration
-            video.frames_total = total_frames
+            # The metadata estimate can be off by a frame on files with an
+            # imprecise frame count; settle the denominator on what was actually
+            # indexed so a finished video always reads exactly 100%.
+            video.frames_total = video.frames_indexed
             video.status = "ready"
             await db.commit()
             logger.info(
-                "Indexed video %s: %d frames over %.1fs",
+                "Indexed video %s: %d frames over %.1fs of video in %.1fs "
+                "(decode %.1fs, embed %.1fs, db %.1fs)",
                 video_id,
                 video.frames_indexed,
-                duration,
+                video.duration_seconds or 0.0,
+                wall_seconds,
+                decode_seconds,
+                embed_seconds,
+                db_seconds,
             )
     except Exception as exc:  # noqa: BLE001 - any failure must be recorded
         logger.exception("Indexing failed for video %s", video_id)
@@ -206,6 +259,7 @@ async def index_video(video_id: uuid.UUID) -> None:
         except Exception:  # pragma: no cover - best effort
             logger.exception("Could not mark video %s as failed", video_id)
     finally:
-        # R2 objects were copied to a temp file for processing.
-        if local_path is not None and storage.backend == "r2":
+        # Either the upload handler's spilled copy or a temp file downloaded
+        # from R2. Never the stored object itself (local backend).
+        if local_path is not None and owns_local_file:
             local_path.unlink(missing_ok=True)

@@ -59,7 +59,7 @@ async def upload_video(
 ) -> VideoOut:
     filename = file.filename or "video.mp4"
     try:
-        video = await videos_service.create_video(
+        video, staged_path = await videos_service.create_video(
             db,
             owner_id=user.id,
             filename=filename,
@@ -80,9 +80,13 @@ async def upload_video(
         ) from exc
 
     # Fire-and-forget: the response goes out immediately with status
-    # `processing`, and indexing runs to completion in the background.
+    # `processing`, and indexing runs to completion in the background. The
+    # pipeline takes ownership of `staged_path` and deletes it when done.
     if settings.index_on_upload:
-        background_tasks.add_task(pipeline.index_video, video.id)
+        background_tasks.add_task(pipeline.index_video, video.id, staged_path)
+    elif staged_path is not None:
+        # Nothing will consume it, so don't leave it in the temp dir.
+        staged_path.unlink(missing_ok=True)
     return VideoOut.model_validate(video)
 
 

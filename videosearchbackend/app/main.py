@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -11,6 +13,7 @@ from app.auth.routes import router as auth_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db import session as db_session
+from app.videos import embedder
 from app.videos.routes import router as videos_router
 from app.videos.search import router as clip_search_router
 
@@ -29,7 +32,28 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # request.
     if await db_session.ping():
         logger.info("Database connection OK")
+
+    # Importing torch and loading CLIP costs ~45 s cold. Doing it here on a
+    # background thread means the first upload or search does not pay for it,
+    # while /health and /docs stay reachable throughout. Deliberately not
+    # awaited: a slow or failed load must not stop the API from booting.
+    warmup_task: asyncio.Task | None = None
+    if settings.prewarm_clip_model:
+
+        async def _prewarm() -> None:
+            started = time.perf_counter()
+            try:
+                await asyncio.to_thread(embedder.load)
+                logger.info("CLIP model ready in %.1fs", time.perf_counter() - started)
+            except Exception:  # noqa: BLE001 - degraded, not fatal
+                logger.exception("CLIP model preload failed; will retry on first use")
+
+        warmup_task = asyncio.create_task(_prewarm())
+
     yield
+
+    if warmup_task is not None and not warmup_task.done():
+        warmup_task.cancel()
     await db_session.dispose()
     logger.info("%s shutting down", settings.app_name)
 

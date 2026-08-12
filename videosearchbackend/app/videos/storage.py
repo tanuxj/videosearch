@@ -18,6 +18,7 @@ already implements Range requests.
 
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -113,6 +114,48 @@ class Storage:
             self._client.delete_object(Bucket=self._bucket, Key=key)
         else:
             self._local_path(key).unlink(missing_ok=True)
+
+    def save_path(self, key: str, path: Path, content_type: str | None) -> None:
+        """Persist an already-local file under `key`.
+
+        Used when the upload was staged to disk first; boto3's ``upload_file``
+        handles its own file handle, so nothing here can be left half-read.
+        """
+        if self._client is not None:
+            assert self._bucket is not None
+            self._client.upload_file(
+                str(path),
+                self._bucket,
+                key,
+                ExtraArgs={"ContentType": content_type or "application/octet-stream"},
+            )
+        else:
+            dest = self._local_path(key)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, dest)
+
+    def spill_to_temp(self, source, suffix: str = "") -> Path:
+        """Copy an uploaded file-like to a temp file and return its path.
+
+        Lets the indexing pipeline read bytes that are already on this machine
+        instead of pulling the object back out of R2 — a local disk copy costs
+        far less than the ~0.36 s/MB download it replaces. The caller owns the
+        returned file and must delete it.
+
+        Call this *before* handing the stream to ``save_file``: boto3 closes the
+        file object it uploads from, and a closed SpooledTemporaryFile cannot be
+        re-read ("seek of closed file").
+        """
+        source.seek(0)
+        fd, name = tempfile.mkstemp(prefix="videosearch-upload-", suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as target:
+                while chunk := source.read(1024 * 1024):
+                    target.write(chunk)
+        except Exception:
+            Path(name).unlink(missing_ok=True)
+            raise
+        return Path(name)
 
     def get_local_path(self, key: str) -> Path:
         """A local filesystem path holding the object's bytes.
