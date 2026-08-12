@@ -3,7 +3,9 @@ import type { Clip } from '../lib/api'
 import { downloadClip, saveBlob } from '../lib/api'
 import { API_ENABLED } from '../lib/http'
 import type { VideoRecord } from '../lib/store'
+import type { ReactNode } from 'react'
 import { Modal } from './Modal'
+import { Button } from './ui/Button'
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -12,6 +14,31 @@ import {
   FilmIcon,
 } from './Icons'
 import { timecode } from '../lib/format'
+
+/** Square icon-only control used by the lightbox toolbar. */
+function IconButton({
+  label,
+  children,
+  disabled,
+  onClick,
+}: {
+  label: string
+  children: ReactNode
+  disabled?: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className="grid size-8 place-items-center rounded-lg text-ink-dim transition-colors hover:bg-surface-sunk hover:text-ink disabled:pointer-events-none disabled:opacity-40 [&_svg]:size-4"
+    >
+      {children}
+    </button>
+  )
+}
 
 type Props = {
   clip: Clip | null
@@ -92,13 +119,22 @@ export function ClipLightbox({
     <Modal open={Boolean(clip)} onClose={onClose} variant="stage">
       {clip && (
         <>
-          <div className="stage-frame">
+          {/* Media sits on near-black regardless of the light chrome around it —
+              letterboxing a video against white washes out the picture. */}
+          <div className="grid aspect-video w-full place-items-center bg-[#0c0e13]">
             {src ? (
-              <video ref={playerRef} src={src} controls playsInline autoPlay />
+              <video
+                ref={playerRef}
+                src={src}
+                controls
+                playsInline
+                autoPlay
+                className="size-full"
+              />
             ) : (
-              <div className="player-placeholder">
+              <div className="flex flex-col items-center px-8 text-center text-white/70 [&_svg]:size-8">
                 <FilmIcon />
-                <p>
+                <p className="mt-3 max-w-[46ch] text-[13.5px] leading-relaxed">
                   The video file isn’t attached to this tab, so playback is
                   unavailable. The match is at {timecode(clip.frame)}.
                 </p>
@@ -106,64 +142,60 @@ export function ClipLightbox({
             )}
           </div>
 
-          <div className="stage-bar">
-            <div className="stage-info">
-              <b>
-                Match {index + 1} of {clips.length} · {timecode(clip.start)} –{' '}
-                {timecode(clip.end)}
+          <div className="flex flex-wrap items-center gap-3 border-t border-line px-4 py-3">
+            <div className="min-w-0 flex-1">
+              <b className="block truncate text-[13.5px] font-semibold text-ink">
+                Match {index + 1} of {clips.length} ·{' '}
+                <span className="font-mono font-medium">
+                  {timecode(clip.start)} – {timecode(clip.end)}
+                </span>
               </b>
-              <span>
+              <span className="block truncate text-[12px] text-ink-faint">
                 {video?.name}
                 {prompt && ` · “${prompt}”`}
               </span>
             </div>
 
-            <span className="stage-score">
+            <span className="shrink-0 rounded-full border border-brand-line bg-brand-wash px-2.5 py-1 text-[12px] font-semibold text-brand">
               {Math.round(clip.score * 100)}% match
             </span>
 
             {API_ENABLED && (
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
+              <Button
+                variant="secondary"
+                size="sm"
                 disabled={downloading || !video}
                 onClick={() => void onDownload()}
                 title="Download this exact clip (start–end)"
+                className="[&_svg]:size-4"
               >
                 <DownloadIcon />
                 {downloading ? 'Preparing…' : 'Download clip'}
-              </button>
+              </Button>
             )}
 
-            {downloadError && <span className="stage-error">{downloadError}</span>}
+            {downloadError && (
+              <span className="text-[12px] text-danger">{downloadError}</span>
+            )}
 
-            <div className="stage-nav">
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="Previous match"
+            <div className="flex shrink-0 items-center gap-1">
+              <IconButton
+                label="Previous match"
                 disabled={index <= 0}
                 onClick={() => onSelect(clips[index - 1]!)}
               >
                 <ArrowLeftIcon />
-              </button>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="Next match"
+              </IconButton>
+              <IconButton
+                label="Next match"
                 disabled={index >= clips.length - 1}
                 onClick={() => onSelect(clips[index + 1]!)}
               >
                 <ArrowRightIcon />
-              </button>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="Close"
-                onClick={onClose}
-              >
+              </IconButton>
+              <IconButton label="Close" onClick={onClose}>
                 <CloseIcon />
-              </button>
+              </IconButton>
             </div>
           </div>
         </>

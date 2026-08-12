@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { AnimatePresence, motion } from 'motion/react'
+import { cn } from '../lib/cn'
 import { CloseIcon } from './Icons'
 
 type ModalProps = {
@@ -35,36 +37,61 @@ export function Modal({
     }
   }, [open, onClose])
 
-  if (!open) return null
-
   return createPortal(
-    <div className="overlay" onMouseDown={onClose}>
-      <div
-        className={`modal modal-${variant}`}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        {title && (
-          <header className="modal-head">
-            <div>
-              <h2>{title}</h2>
-              {subtitle && <p>{subtitle}</p>}
-            </div>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={onClose}
-              aria-label="Close"
-            >
-              <CloseIcon />
-            </button>
-          </header>
-        )}
-        {children}
-      </div>
-    </div>,
+    // AnimatePresence keeps the node mounted through its exit transition, so
+    // the dialog fades out instead of vanishing on close.
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className="fixed inset-0 z-[100] grid place-items-center overflow-y-auto bg-ink/25 p-4 backdrop-blur-[3px]"
+          onMouseDown={onClose}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.18 }}
+        >
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-label={title}
+            onMouseDown={(event) => event.stopPropagation()}
+            initial={{ opacity: 0, y: 10, scale: 0.985 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 6, scale: 0.99 }}
+            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            className={cn(
+              'relative w-full overflow-hidden rounded-2xl border border-line bg-panel',
+              'shadow-[0_30px_70px_-24px_rgba(16,19,26,0.35)]',
+              variant === 'stage' ? 'max-w-[1080px]' : 'max-w-[520px]',
+            )}
+          >
+            {title && (
+              <header className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
+                <div>
+                  <h2 className="text-[16.5px] font-semibold tracking-[-0.02em] text-ink">
+                    {title}
+                  </h2>
+                  {subtitle && (
+                    <p className="mt-0.5 text-[13px] text-ink-dim">
+                      {subtitle}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  aria-label="Close"
+                  className="grid size-8 shrink-0 place-items-center rounded-lg text-ink-dim transition-colors hover:bg-surface-sunk hover:text-ink [&_svg]:size-4"
+                >
+                  <CloseIcon />
+                </button>
+              </header>
+            )}
+            {children}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>,
     document.body,
   )
 }

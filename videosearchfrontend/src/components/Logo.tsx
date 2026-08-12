@@ -82,14 +82,19 @@ export function LogoMark({ size = 32, className }: Props) {
  * Wordmark. Splits a `SearchInVideo`-style name into three parts so the
  * connecting word can carry the gradient; any other name renders as-is.
  */
+const WORDMARK =
+  'text-[16.5px] font-bold tracking-[-0.03em] text-ink whitespace-nowrap'
+
 export function Wordmark({ name }: { name: string }) {
   const parts = /^(search)(in)(video)$/i.exec(name)
-  if (!parts) return <span className="wordmark">{name}</span>
+  if (!parts) return <span className={WORDMARK}>{name}</span>
 
   return (
-    <span className="wordmark">
+    <span className={WORDMARK}>
       {parts[1]}
-      <em className="gradient-text">{parts[2]}</em>
+      <em className="bg-[linear-gradient(100deg,var(--accent),var(--accent-2))] bg-clip-text not-italic text-transparent">
+        {parts[2]}
+      </em>
       {parts[3]}
     </span>
   )

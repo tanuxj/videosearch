@@ -1,9 +1,10 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     // Pin to IPv4 loopback: Node resolves 'localhost' to IPv6 first on
     // Windows, which makes the port unreachable at 127.0.0.1.

@@ -2,7 +2,14 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate } from '../lib/router'
 import { authErrorMessage, useAuth } from '../lib/auth'
-import { AuthLayout, Field } from '../components/AuthLayout'
+import {
+  Alert,
+  AuthHead,
+  AuthLayout,
+  Field,
+  Spinner,
+} from '../components/AuthLayout'
+import { Button } from '../components/ui/Button'
 import { LockIcon, MailIcon } from '../components/Icons'
 
 export default function Login() {
@@ -37,17 +44,12 @@ export default function Login() {
 
   return (
     <AuthLayout>
-      <div className="auth-head">
-        <h1>Welcome back</h1>
-        <p>Sign in to search your indexed videos.</p>
-      </div>
+      <AuthHead title="Welcome back">
+        Sign in to search your indexed videos.
+      </AuthHead>
 
-      <form className="auth-form" onSubmit={handleSubmit} noValidate>
-        {formError && (
-          <p className="alert" role="alert">
-            {formError}
-          </p>
-        )}
+      <form className="flex flex-col gap-4" onSubmit={handleSubmit} noValidate>
+        {formError && <Alert>{formError}</Alert>}
 
         <Field
           label="Email"
@@ -71,26 +73,37 @@ export default function Login() {
           error={errors.password}
         />
 
-        <div className="auth-meta">
-          <label>
-            <input type="checkbox" defaultChecked />
+        <div className="flex items-center justify-between text-[13px]">
+          <label className="flex cursor-pointer items-center gap-2 text-ink-mid">
+            <input
+              type="checkbox"
+              defaultChecked
+              className="size-4 accent-[var(--accent)]"
+            />
             Keep me signed in
           </label>
-          <a href="#reset">Forgot password?</a>
+          <a
+            href="#reset"
+            className="font-medium text-brand transition-opacity hover:opacity-75"
+          >
+            Forgot password?
+          </a>
         </div>
 
-        <button
-          type="submit"
-          className="btn btn-primary btn-lg btn-block"
-          disabled={busy}
-        >
-          {busy && <span className="spinner" />}
+        <Button type="submit" size="lg" disabled={busy} className="mt-1 w-full">
+          {busy && <Spinner />}
           {busy ? 'Signing in…' : 'Sign in'}
-        </button>
+        </Button>
       </form>
 
-      <p className="auth-alt">
-        New here? <Link to="/signup">Create an account</Link>
+      <p className="mt-6 text-center text-[13.5px] text-ink-dim">
+        New here?{' '}
+        <Link
+          to="/signup"
+          className="font-medium text-brand transition-opacity hover:opacity-75"
+        >
+          Create an account
+        </Link>
       </p>
     </AuthLayout>
   )

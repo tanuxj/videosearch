@@ -2,6 +2,9 @@ import { useEffect } from 'react'
 import { AuthProvider, useAuth } from './lib/auth'
 import { Link, useNavigate, useRoute } from './lib/router'
 import { MarketingShell } from './components/Shell'
+import { AuroraBackground, GridPattern } from './components/ui/Backgrounds'
+import { GlowButton } from './components/ui/Button'
+import { Eyebrow } from './components/ui/Text'
 import Home from './pages/Home'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
@@ -14,20 +17,24 @@ const AUTH_ONLY = new Set(['/login', '/signup'])
 function NotFound() {
   return (
     <MarketingShell>
-      <section className="wrap hero">
-        <span className="eyebrow">
-          <b>404</b> Page not found
-        </span>
-        <h1>This page doesn’t exist</h1>
-        <p className="hero-sub">
+      <AuroraBackground className="px-6 py-24 text-center">
+        <GridPattern />
+        <Eyebrow>
+          <span className="font-mono font-semibold">404</span>
+          Page not found
+        </Eyebrow>
+        <h1 className="mx-auto mt-6 max-w-[20ch] text-[clamp(2rem,5vw,3.2rem)] leading-[1.05] font-bold tracking-[-0.035em] text-ink">
+          This page doesn’t exist
+        </h1>
+        <p className="mx-auto mt-4 max-w-[52ch] text-[16px] leading-relaxed text-ink-mid">
           The link may be out of date. Head back and pick up where you left off.
         </p>
-        <div className="hero-cta">
-          <Link to="/" className="btn btn-primary btn-lg">
+        <div className="mt-8 flex justify-center">
+          <GlowButton as={Link} to="/">
             Back to home
-          </Link>
+          </GlowButton>
         </div>
-      </section>
+      </AuroraBackground>
     </MarketingShell>
   )
 }

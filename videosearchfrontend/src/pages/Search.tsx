@@ -17,6 +17,11 @@ import { AppShell } from '../components/Shell'
 import { VideoSelect } from '../components/VideoSelect'
 import { UploadDialog } from '../components/UploadDialog'
 import { ClipLightbox } from '../components/ClipLightbox'
+import { Button } from '../components/ui/Button'
+import { GlowBorderCard, SpotlightCard } from '../components/ui/Card'
+import { Chip, EmptyState, Panel } from '../components/ui/Data'
+import { Reveal, Shimmer } from '../components/ui/Motion'
+import { Spinner } from '../components/AuthLayout'
 import { PlayIcon, SearchIcon, SparkIcon, UploadIcon } from '../components/Icons'
 import { timecode } from '../lib/format'
 
@@ -151,47 +156,44 @@ export default function Search() {
       title="Find a scene"
       subtitle="Pick an indexed video, describe the moment, and jump straight to it."
       actions={
-        <button
-          type="button"
-          className="btn btn-ghost btn-sm"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => setUploadOpen(true)}
+          className="[&_svg]:size-4"
         >
           <UploadIcon />
           Add video
-        </button>
+        </Button>
       }
     >
-      <div className="composer-wrap">
-        <div className="composer">
-          <div className="composer-top">
+      <div className="mx-auto w-full max-w-[900px]">
+        {/* ── Composer ─────────────────────────────────────── */}
+        <GlowBorderCard
+          className="shadow-[0_18px_46px_-26px_rgba(16,19,26,0.24)]"
+          innerClassName="p-3 sm:p-4"
+        >
+          <div className="flex flex-wrap items-center gap-2">
             <VideoSelect
               videos={videos}
               selectedId={selectedId}
               onSelect={setSelectedId}
               onUpload={() => setUploadOpen(true)}
             />
-            {selected && (
-              <span
-                className={`chip ${
-                  selected.status === 'ready'
-                    ? 'chip-ok'
-                    : selected.status === 'failed'
-                      ? 'chip-bad'
-                      : 'chip-warn'
-                }`}
-              >
-                {selected.status === 'ready'
-                  ? 'Indexed'
-                  : selected.status === 'failed'
-                    ? 'Indexing failed'
-                    : 'Indexing'}
-              </span>
-            )}
+            {selected &&
+              (selected.status === 'ready' ? (
+                <Chip tone="ok">Indexed</Chip>
+              ) : selected.status === 'failed' ? (
+                <Chip tone="danger">Indexing failed</Chip>
+              ) : (
+                <Chip tone="warn" pulse>
+                  Indexing
+                </Chip>
+              ))}
           </div>
 
           <textarea
             ref={promptRef}
-            className="composer-input"
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={onPromptKey}
@@ -202,20 +204,21 @@ export default function Search() {
                 : 'Add a video first, then describe the scene you want to find'
             }
             aria-label="Describe the scene you're looking for"
+            className="mt-3 block w-full resize-none bg-transparent px-1.5 text-[16.5px] leading-relaxed text-ink outline-none placeholder:text-ink-faint"
           />
 
-          <div className="composer-foot">
-            <div className="composer-chips">
+          <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-line pt-3">
+            <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
               {selected &&
                 SUGGESTIONS.slice(0, 3).map((suggestion) => (
                   <button
                     key={suggestion}
                     type="button"
-                    className="suggest"
                     onClick={() => {
                       setPrompt(suggestion)
                       void runSearch(suggestion)
                     }}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-soft px-2.5 py-1 text-[12px] text-ink-dim transition-colors hover:border-brand-line hover:bg-brand-wash hover:text-brand [&_svg]:size-3.5"
                   >
                     <SparkIcon />
                     {suggestion}
@@ -223,21 +226,25 @@ export default function Search() {
                 ))}
             </div>
 
-            <span className="composer-hint">⏎ to search</span>
-            <button
-              type="button"
-              className="btn btn-primary"
+            <span className="hidden text-[12px] text-ink-faint sm:inline">
+              <kbd className="rounded border border-line-strong bg-surface-soft px-1.5 py-0.5 font-mono text-[11px]">
+                ⏎
+              </kbd>{' '}
+              to search
+            </span>
+            <Button
               disabled={!canSearch}
               onClick={() => void runSearch(prompt)}
+              className="[&_svg]:size-4"
             >
-              {searching ? <span className="spinner" /> : <SearchIcon />}
+              {searching ? <Spinner /> : <SearchIcon />}
               {searching ? 'Searching' : 'Find clips'}
-            </button>
+            </Button>
           </div>
-        </div>
+        </GlowBorderCard>
 
         {selected && !src && selected.status !== 'failed' && (
-          <p className="composer-note">
+          <p className="mt-3 flex flex-wrap items-center gap-x-1.5 gap-y-1 px-1 text-[13px] text-ink-dim">
             {selected.status === 'processing'
               ? 'Indexing is still running — search unlocks once every frame is embedded.'
               : API_ENABLED
@@ -247,8 +254,8 @@ export default function Search() {
               <>
                 <button
                   type="button"
-                  className="linkish"
                   onClick={() => reattachRef.current?.click()}
+                  className="font-medium text-brand underline underline-offset-2 transition-opacity hover:opacity-75"
                 >
                   Re-attach file
                 </button>
@@ -270,27 +277,34 @@ export default function Search() {
       </div>
 
       {searching && (
-        <>
-          <div className="results-head">
-            <h2>Scanning indexed frames…</h2>
-          </div>
-          <div className="clip-grid">
+        <div className="mt-8">
+          <h2 className="mb-4 text-[15.5px] font-semibold tracking-[-0.015em] text-ink">
+            Scanning indexed frames…
+          </h2>
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
             {Array.from({ length: 8 }, (_, index) => (
-              <div key={index} className="skeleton" />
+              <div
+                key={index}
+                className="overflow-hidden rounded-2xl border border-line bg-panel p-2.5"
+              >
+                <Shimmer className="aspect-video w-full rounded-xl" />
+                <Shimmer className="mt-2.5 h-3 w-2/3" />
+                <Shimmer className="mt-2 h-2 w-full" />
+              </div>
             ))}
           </div>
-        </>
+        </div>
       )}
 
       {!searching && clips && (
-        <>
-          <div className="results-head">
-            <h2>
+        <div className="mt-8">
+          <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-[15.5px] font-semibold tracking-[-0.015em] text-ink">
               {clips.length} {clips.length === 1 ? 'match' : 'matches'} for “
               {lastQuery}”
             </h2>
             {meta && (
-              <span>
+              <span className="text-[12.5px] text-ink-faint">
                 {meta.tookMs} ms ·{' '}
                 {meta.source === 'api'
                   ? 'ranked by backend'
@@ -300,107 +314,134 @@ export default function Search() {
           </div>
 
           {clips.length === 0 ? (
-            <section className="panel" style={{ marginTop: 0 }}>
-              <div className="empty">
-                <span className="empty-icon">
-                  <SearchIcon />
-                </span>
-                <h3>No frames matched</h3>
-                <p>
-                  Try describing what’s visible in the shot — objects, setting,
-                  colours — rather than what’s said.
-                </p>
-              </div>
-            </section>
+            <Panel>
+              <EmptyState
+                icon={<SearchIcon />}
+                title="No frames matched"
+                body="Try describing what’s visible in the shot — objects, setting, colours — rather than what’s said."
+              />
+            </Panel>
           ) : (
-            <div className="clip-grid">
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
               {clips.map((clip, index) => {
                 const thumb = thumbs.get(clip.frame)
+                const percent = Math.round(clip.score * 100)
                 return (
-                  <button
-                    key={clip.id}
-                    type="button"
-                    className="clip"
-                    style={{ animationDelay: `${index * 28}ms` }}
-                    onClick={() => setOpenClip(clip)}
-                  >
-                    <span className="clip-thumb">
-                      {thumb ? (
-                        <img src={thumb} alt="" />
-                      ) : (
-                        <span className="clip-thumb-fallback">
-                          <PlayIcon />
+                  <Reveal key={clip.id} y={10} delay={index * 0.028}>
+                    <SpotlightCard className="h-full">
+                      <button
+                        type="button"
+                        onClick={() => setOpenClip(clip)}
+                        className="block w-full cursor-pointer p-2.5 text-left"
+                      >
+                        <span className="relative block aspect-video overflow-hidden rounded-xl border border-line bg-surface-sunk">
+                          {thumb ? (
+                            <img
+                              src={thumb}
+                              alt=""
+                              className="size-full object-cover"
+                            />
+                          ) : (
+                            <span className="grid size-full place-items-center bg-[linear-gradient(135deg,var(--bg-sunk),color-mix(in_oklab,var(--accent)_12%,var(--bg-sunk)))] text-brand [&_svg]:size-6">
+                              <PlayIcon />
+                            </span>
+                          )}
+
+                          {/* Rank — the only place the result's position is stated. */}
+                          <span className="absolute top-2 left-2 rounded-md bg-ink/72 px-1.5 py-0.5 font-mono text-[11px] font-medium text-white backdrop-blur-sm">
+                            #{index + 1}
+                          </span>
+
+                          <span className="absolute inset-0 grid place-items-center bg-ink/0 opacity-0 transition-[opacity,background-color] duration-200 group-hover:bg-ink/20 group-hover:opacity-100">
+                            <i className="grid size-11 place-items-center rounded-full bg-panel/90 text-brand shadow-[0_8px_20px_-8px_rgba(16,19,26,0.45)] backdrop-blur [&_svg]:size-5">
+                              <PlayIcon />
+                            </i>
+                          </span>
+
+                          <span className="absolute right-2 bottom-2 rounded-md bg-ink/72 px-1.5 py-0.5 font-mono text-[11px] text-white backdrop-blur-sm">
+                            {timecode(clip.start)} – {timecode(clip.end)}
+                          </span>
                         </span>
-                      )}
-                      <span className="clip-rank">#{index + 1}</span>
-                      <span className="clip-play">
-                        <i>
-                          <PlayIcon />
-                        </i>
-                      </span>
-                      <span className="clip-time">
-                        {timecode(clip.start)} – {timecode(clip.end)}
-                      </span>
-                    </span>
-                    <span className="clip-body">
-                      <span className="clip-title">
-                        Frame at {timecode(clip.frame)}
-                      </span>
-                      <span className="clip-foot">
-                        <span className="match">
-                          <i
-                            style={{ width: `${Math.round(clip.score * 100)}%` }}
-                          />
+
+                        <span className="mt-2.5 block px-0.5">
+                          <span className="block truncate text-[13.5px] font-medium text-ink">
+                            Frame at {timecode(clip.frame)}
+                          </span>
+
+                          {/* Match meter. Track is a lighter step of the same
+                              hue as the fill so the whole bar reads as one
+                              scale; the value stays in ink, the bar carries
+                              the colour. */}
+                          <span className="mt-2 flex items-center gap-2">
+                            <span className="relative block h-1.5 flex-1 overflow-hidden rounded-full bg-brand-wash">
+                              <i
+                                className="absolute inset-y-0 left-0 rounded-full bg-[linear-gradient(90deg,var(--accent),var(--accent-2))]"
+                                style={{ width: `${percent}%` }}
+                              />
+                            </span>
+                            <span className="shrink-0 text-[12px] font-semibold text-ink-mid">
+                              {percent}%
+                            </span>
+                          </span>
                         </span>
-                        <span className="match-val">
-                          {Math.round(clip.score * 100)}%
-                        </span>
-                      </span>
-                    </span>
-                  </button>
+                      </button>
+                    </SpotlightCard>
+                  </Reveal>
                 )
               })}
             </div>
           )}
-        </>
+        </div>
       )}
 
       {!searching && !clips && (
-        <div className="prompt-guide">
-          <div className="prompt-guide-head">
-            <h2>{selected ? 'Try describing…' : 'Start by adding a video'}</h2>
-            <p>
+        <div className="mx-auto mt-10 w-full max-w-[900px]">
+          <div className="mb-5 text-center">
+            <h2 className="text-[19px] font-semibold tracking-[-0.02em] text-ink">
+              {selected ? 'Try describing…' : 'Start by adding a video'}
+            </h2>
+            <p className="mx-auto mt-2 max-w-[58ch] text-[14px] leading-relaxed text-ink-dim">
               {selected
                 ? 'Matching runs on what the camera saw, so describe the visuals rather than the dialogue.'
                 : 'Once a video is indexed, every second of it becomes searchable by description.'}
             </p>
           </div>
+
           {selected ? (
-            <div className="prompt-guide-grid">
-              {SUGGESTIONS.map((suggestion) => (
-                <button
-                  key={suggestion}
-                  type="button"
-                  className="prompt-card"
-                  onClick={() => {
-                    setPrompt(suggestion)
-                    void runSearch(suggestion)
-                  }}
-                >
-                  <SparkIcon />
-                  <span>{suggestion}</span>
-                </button>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
+              {SUGGESTIONS.map((suggestion, index) => (
+                <Reveal key={suggestion} y={8} delay={index * 0.04}>
+                  <SpotlightCard className="h-full">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPrompt(suggestion)
+                        void runSearch(suggestion)
+                      }}
+                      className="flex w-full cursor-pointer items-start gap-2.5 p-3.5 text-left"
+                    >
+                      <span className="mt-px grid size-7 shrink-0 place-items-center rounded-lg border border-brand-line bg-brand-wash text-brand [&_svg]:size-3.5">
+                        <SparkIcon />
+                      </span>
+                      <span className="text-[13.5px] leading-snug text-ink-mid">
+                        {suggestion}
+                      </span>
+                    </button>
+                  </SpotlightCard>
+                </Reveal>
               ))}
             </div>
           ) : (
-            <button
-              type="button"
-              className="btn btn-primary btn-lg"
-              onClick={() => setUploadOpen(true)}
-            >
-              <UploadIcon />
-              Add your first video
-            </button>
+            <div className="flex justify-center">
+              <Button
+                size="lg"
+                onClick={() => setUploadOpen(true)}
+                className="[&_svg]:size-[18px]"
+              >
+                <UploadIcon />
+                Add your first video
+              </Button>
+            </div>
           )}
         </div>
       )}
