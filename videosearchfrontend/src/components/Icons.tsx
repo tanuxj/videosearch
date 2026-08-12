@@ -43,6 +43,14 @@ export const UploadIcon = () => (
   </Stroke>
 )
 
+export const DownloadIcon = () => (
+  <Stroke>
+    <path d="M12 4v11" />
+    <path d="M7.5 10.5L12 15l4.5-4.5" />
+    <path d="M4 15.5v2.5A2 2 0 006 20h12a2 2 0 002-2v-2.5" />
+  </Stroke>
+)
+
 export const FilmIcon = () => (
   <Stroke>
     <rect x="3" y="4" width="18" height="16" rx="2.5" />

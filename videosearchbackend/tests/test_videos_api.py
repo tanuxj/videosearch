@@ -194,6 +194,140 @@ def test_stream_someone_elses_video_is_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+# ── Clip download ──────────────────────────────────────────────
+
+
+def test_clip_requires_auth(client: TestClient) -> None:
+    response = client.get(
+        "/api/v1/videos/00000000-0000-0000-0000-000000000000/clip",
+        params={"start": 0, "end": 1},
+    )
+    assert response.status_code == 401
+
+
+def test_clip_someone_elses_video_is_404(client: TestClient) -> None:
+    mine = _auth_headers(client)
+    video_id = _upload(client, mine)["id"]
+    _auth_headers(client, email="other@example.com", name="Other Person")
+
+    response = client.get(
+        f"/api/v1/videos/{video_id}/clip",
+        headers={"Authorization": f"Bearer {_signin_other(client)}"},
+        params={"start": 0, "end": 1},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        (0, 0),
+        (5, 3),
+        (0, -1),
+        (-1, 5),
+        (0, 10_000),  # over the MAX_CLIP_SECONDS cap
+    ],
+)
+def test_clip_rejects_invalid_ranges(client: TestClient, start: float, end: float) -> None:
+    headers = _auth_headers(client)
+    video_id = _upload(client, headers)["id"]
+
+    response = client.get(
+        f"/api/v1/videos/{video_id}/clip",
+        headers=headers,
+        params={"start": start, "end": end},
+    )
+    assert response.status_code == 422
+
+
+def test_clip_clamps_end_to_known_duration(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from app.videos import clips, service
+
+    trimmed: list[tuple] = []
+
+    def _fake_trim(source, start, end, output):
+        trimmed.append((start, end))
+        output.write_bytes(b"fake-clip-mp4-bytes")
+        return output
+
+    monkeypatch.setattr(clips, "trim", _fake_trim)
+    headers = _auth_headers(client)
+
+    async def _fake_get_video(db, owner_id, video_id):
+        # A known duration exercises the end-clamp without touching the DB.
+        return SimpleNamespace(
+            storage_key="00000000-0000-0000-0000-000000000000/video.mp4",
+            name="clip.mp4",
+            duration_seconds=10.0,
+        )
+
+    monkeypatch.setattr(service, "get_video", _fake_get_video)
+
+    response = client.get(
+        "/api/v1/videos/00000000-0000-0000-0000-000000000000/clip",
+        headers=headers,
+        params={"start": 2, "end": 999},
+    )
+    assert response.status_code == 200, response.text
+    assert response.content == b"fake-clip-mp4-bytes"
+    assert "attachment" in response.headers.get("content-disposition", "")
+    assert trimmed == [(2.0, 10.0)]
+
+
+def test_clip_returns_trimmed_attachment(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos import clips
+
+    def _fake_trim(source, start, end, output):
+        output.write_bytes(b"fake-clip-mp4-bytes")
+        return output
+
+    monkeypatch.setattr(clips, "trim", _fake_trim)
+    headers = _auth_headers(client)
+    video_id = _upload(client, headers)["id"]
+
+    response = client.get(
+        f"/api/v1/videos/{video_id}/clip",
+        headers=headers,
+        params={"start": 1.5, "end": 4.5},
+    )
+    assert response.status_code == 200, response.text
+    assert response.content == b"fake-clip-mp4-bytes"
+    disposition = response.headers["content-disposition"]
+    assert "attachment" in disposition
+    # Starlette URL-encodes the filename (spaces/brackets) in the `filename*=`
+    # form; decode it back before comparing. The name is the video's stem
+    # ("clip.mp4" → "clip") so the download reads like a real clip file.
+    from urllib.parse import unquote
+
+    assert unquote(disposition) == "attachment; filename*=utf-8''clip [1-4s].mp4"
+    assert response.headers["content-type"].startswith("video/mp4")
+
+
+def test_clip_503_when_trim_fails(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.videos import clips
+
+    def _broken_trim(source, start, end, output):
+        raise clips.ClipError("boom")
+
+    monkeypatch.setattr(clips, "trim", _broken_trim)
+    headers = _auth_headers(client)
+    video_id = _upload(client, headers)["id"]
+
+    response = client.get(
+        f"/api/v1/videos/{video_id}/clip",
+        headers=headers,
+        params={"start": 0, "end": 2},
+    )
+    assert response.status_code == 503
+    assert "boom" in response.json()["detail"]
+
+
 # ── Stream URL (edge worker) ───────────────────────────────────
 
 

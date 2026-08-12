@@ -1,21 +1,35 @@
-"""Video routes: upload, list, status, stream, delete.
+"""Video routes: upload, list, status, stream, clip, delete.
 
 Upload is the entry point of the indexing pipeline: it stores the file, opens
 a `processing` video row, and enqueues the background job that extracts and
 embeds frames.
 """
 
+import math
+import shutil
+import tempfile
 import uuid
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from app.auth.deps import CurrentUser, DbSession
 from app.auth.schemas import MessageResponse
 from app.core.config import get_settings
-from app.videos import pipeline
+from app.videos import clips, pipeline
 from app.videos import service as videos_service
 from app.videos.schemas import (
     CompleteUploadOut,
@@ -27,6 +41,22 @@ from app.videos.schemas import (
 )
 from app.videos.storage import storage
 from app.videos.streaming import build_stream_url
+
+# Longest extractable clip (seconds). Keeps ffmpeg runs (and downloads) sane.
+MAX_CLIP_SECONDS = 600.0
+
+
+def _cleanup_clip_files(source: Path, temp_dir: Path) -> None:
+    """Remove the clip output dir and any R2 temp download after streaming.
+
+    `source` is the live stored file on the local backend (must be kept) and
+    a private temp copy on R2 (must be removed). The `temp_dir` always holds
+    our clip output and is always ours to delete.
+    """
+    if storage.backend == "r2" and source.is_file():
+        source.unlink(missing_ok=True)
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 settings = get_settings()
 
@@ -297,6 +327,82 @@ async def stream_video(
     ext = f".{video.storage_key.rsplit('.', 1)[-1].lower()}"
     media_type = _MEDIA_TYPES.get(ext)
     return storage.stream_response(video.storage_key, media_type, request.headers.get("range"))
+
+
+@router.get(
+    "/{video_id}/clip",
+    response_class=FileResponse,
+    response_model=None,
+    summary="Download a trimmed clip",
+    description=(
+        "Cuts the video to the [start, end) second range with ffmpeg and "
+        "returns it as an MP4 attachment. Clips are capped at 10 minutes "
+        "and validated against the video's known duration when available."
+    ),
+    responses={
+        404: {"description": "Video not found"},
+        422: {"description": "Invalid clip range"},
+        503: {"description": "Clip extraction unavailable"},
+    },
+)
+async def download_clip(
+    user: CurrentUser,
+    db: DbSession,
+    video_id: uuid.UUID,
+    start: float = Query(ge=0, description="Clip start, in seconds"),
+    end: float = Query(gt=0, description="Clip end, in seconds"),
+):
+    try:
+        video = await videos_service.get_video(db, user.id, video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+
+    if not (math.isfinite(start) and math.isfinite(end)):
+        raise HTTPException(status_code=422, detail="Clip times must be finite numbers")
+    if end <= start:
+        raise HTTPException(status_code=422, detail="Clip end must be after start")
+    # Clamp to the known duration first — a stale result can't request past
+    # EOF, and a long request on a short video is the user's clip, not an
+    # over-limit one.
+    if video.duration_seconds is not None and end > video.duration_seconds:
+        end = video.duration_seconds
+        if end <= start:
+            raise HTTPException(status_code=422, detail="Clip lies beyond the video's end")
+    if end - start > MAX_CLIP_SECONDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Clip is longer than the {MAX_CLIP_SECONDS:.0f}s limit",
+        )
+
+    # ffmpeg needs a local file: R2 objects are pulled down to a temp file.
+    source = await run_in_threadpool(storage.get_local_path, video.storage_key)
+    temp_dir = Path(tempfile.mkdtemp(prefix="videosearch-clip-"))
+    output = temp_dir / f"clip-{video_id}.mp4"
+    try:
+        try:
+            await run_in_threadpool(clips.trim, source, start, end, output)
+        except clips.ClipError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Could not extract clip: {exc}",
+            ) from exc
+
+        name = Path(video.name).stem[:80] or "clip"
+        filename = f"{name} [{int(start)}-{int(end)}s].mp4"
+        return FileResponse(
+            output,
+            media_type="video/mp4",
+            filename=filename,
+            content_disposition_type="attachment",
+            # Files must survive until Starlette finishes streaming the body, so
+            # they are removed on a background task — never in this coroutine.
+            background=BackgroundTask(_cleanup_clip_files, source, temp_dir),
+        )
+    except Exception:
+        # Any failure before the response streams (unexpected errors too — a
+        # missing imageio-ffmpeg, an OSError) must not leak the temp files.
+        _cleanup_clip_files(source, temp_dir)
+        raise
 
 
 @router.delete(

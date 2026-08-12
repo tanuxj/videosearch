@@ -1,5 +1,5 @@
 import type { VideoRecord } from './store'
-import { API_ENABLED, getAccessToken, url } from './http'
+import { API_ENABLED, apiFetch, getAccessToken, url } from './http'
 
 /**
  * Clip search. When VITE_API_URL is set the prompt goes to the backend's
@@ -146,4 +146,37 @@ export async function searchClips(
     source: 'local',
     tookMs: Math.round(performance.now() - startedAt),
   }
+}
+
+/**
+ * Download a trimmed clip ([start, end) seconds) of a video as a Blob.
+ *
+ * The backend cuts the segment with ffmpeg and streams it back as an MP4
+ * attachment. Falls back to the raw API error when the request fails.
+ */
+export async function downloadClip(
+  videoId: string,
+  start: number,
+  end: number,
+): Promise<Blob> {
+  const params = new URLSearchParams({
+    start: String(start),
+    end: String(end),
+  })
+  return apiFetch<Blob>(`/api/v1/videos/${videoId}/clip?${params}`, {
+    parseBlob: true,
+  })
+}
+
+/** Save a Blob to the user's disk as a real file download. */
+export function saveBlob(blob: Blob, filename: string): void {
+  const objectUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  // Revoke on the next tick so the browser has started the download.
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000)
 }

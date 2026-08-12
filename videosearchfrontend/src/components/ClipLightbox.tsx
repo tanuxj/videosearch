@@ -1,8 +1,16 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Clip } from '../lib/api'
+import { downloadClip, saveBlob } from '../lib/api'
+import { API_ENABLED } from '../lib/http'
 import type { VideoRecord } from '../lib/store'
 import { Modal } from './Modal'
-import { ArrowLeftIcon, ArrowRightIcon, CloseIcon, FilmIcon } from './Icons'
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  CloseIcon,
+  DownloadIcon,
+  FilmIcon,
+} from './Icons'
 import { timecode } from '../lib/format'
 
 type Props = {
@@ -25,6 +33,8 @@ export function ClipLightbox({
   onClose,
 }: Props) {
   const playerRef = useRef<HTMLVideoElement>(null)
+  const [downloading, setDownloading] = useState(false)
+  const [downloadError, setDownloadError] = useState<string | null>(null)
   const index = clip ? clips.findIndex((item) => item.id === clip.id) : -1
 
   // Seek to the match and play whenever the selected clip changes.
@@ -35,6 +45,18 @@ export function ClipLightbox({
     void player.play().catch(() => {
       /* autoplay blocked — the controls are right there */
     })
+  }, [clip])
+
+  // The match has a defined window — stop the moment playback passes it
+  // instead of letting the full video run on past the clip's end.
+  useEffect(() => {
+    const player = playerRef.current
+    if (!player || !clip) return
+    const stopAtEnd = () => {
+      if (player.currentTime >= clip.end) player.pause()
+    }
+    player.addEventListener('timeupdate', stopAtEnd)
+    return () => player.removeEventListener('timeupdate', stopAtEnd)
   }, [clip])
 
   useEffect(() => {
@@ -50,6 +72,21 @@ export function ClipLightbox({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [clip, clips, index, onSelect])
+
+  const onDownload = useCallback(async () => {
+    if (!video || !clip) return
+    setDownloading(true)
+    setDownloadError(null)
+    try {
+      const blob = await downloadClip(video.id, clip.start, clip.end)
+      const base = video.name.replace(/\.[^/.]+$/, '').slice(0, 60) || 'clip'
+      saveBlob(blob, `${base} [${timecode(clip.start)}-${timecode(clip.end)}].mp4`)
+    } catch {
+      setDownloadError('Could not download this clip — try again.')
+    } finally {
+      setDownloading(false)
+    }
+  }, [video, clip])
 
   return (
     <Modal open={Boolean(clip)} onClose={onClose} variant="stage">
@@ -84,6 +121,21 @@ export function ClipLightbox({
             <span className="stage-score">
               {Math.round(clip.score * 100)}% match
             </span>
+
+            {API_ENABLED && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={downloading || !video}
+                onClick={() => void onDownload()}
+                title="Download this exact clip (start–end)"
+              >
+                <DownloadIcon />
+                {downloading ? 'Preparing…' : 'Download clip'}
+              </button>
+            )}
+
+            {downloadError && <span className="stage-error">{downloadError}</span>}
 
             <div className="stage-nav">
               <button

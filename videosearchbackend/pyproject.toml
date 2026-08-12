@@ -29,6 +29,7 @@ dependencies = [
     "onnxruntime>=1.28.0",
     "onnx>=1.22.0",
     "onnxscript>=0.7.1",
+    "imageio-ffmpeg>=0.6.0",
 ]
 
 # torch from the CPU-only wheelhouse: the PyPI default build bundles CUDA,
