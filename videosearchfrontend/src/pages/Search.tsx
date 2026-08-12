@@ -114,18 +114,25 @@ export default function Search() {
     setClips(result.clips)
     setMeta({ source: result.source, tookMs: result.tookMs })
     setSearching(false)
-
-    // Real thumbnails, pulled from the file that's already in the browser.
-    const source = sourceFor(target.id)
-    if (source && result.clips.length > 0) {
-      setThumbs(
-        await captureFrames(
-          source,
-          result.clips.map((clip) => clip.frame),
-        ),
-      )
-    }
   }
+
+  // Real thumbnails, captured from whichever playback source is live (a
+  // locally-attached file, a downloaded blob, or the signed edge URL). The
+  // source can finish loading after the search, so this re-runs whenever the
+  // results or the source change, and cancels stale work on re-render.
+  useEffect(() => {
+    if (!clips || clips.length === 0 || !src) return
+    let cancelled = false
+    void captureFrames(
+      src,
+      clips.map((clip) => clip.frame),
+    ).then((frames) => {
+      if (!cancelled) setThumbs(frames)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [clips, src])
 
   function onPromptKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === 'Enter' && !event.shiftKey) {
