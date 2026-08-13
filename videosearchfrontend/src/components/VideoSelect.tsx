@@ -13,7 +13,7 @@ type Props = {
 }
 
 const THUMB =
-  'grid size-9 shrink-0 place-items-center overflow-hidden rounded-lg border border-line bg-[linear-gradient(135deg,var(--bg-sunk),color-mix(in_oklab,var(--accent)_12%,var(--bg-sunk)))] text-brand [&_svg]:size-4 [&_img]:size-full [&_img]:object-cover'
+  'grid size-9 shrink-0 place-items-center overflow-hidden rounded-lg border border-line bg-surface-sunk text-brand [&_svg]:size-4 [&_img]:size-full [&_img]:object-cover'
 
 export function VideoSelect({ videos, selectedId, onSelect, onUpload }: Props) {
   const [open, setOpen] = useState(false)
@@ -88,7 +88,7 @@ export function VideoSelect({ videos, selectedId, onSelect, onUpload }: Props) {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -4, scale: 0.99 }}
             transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
-            className="absolute top-[calc(100%+6px)] left-0 z-50 max-h-[340px] w-full min-w-[280px] overflow-y-auto rounded-xl border border-line bg-panel p-1.5 shadow-[0_20px_44px_-20px_rgba(16,19,26,0.3)]"
+            className="absolute top-[calc(100%+6px)] left-0 z-50 max-h-[340px] w-full min-w-[280px] overflow-y-auto rounded-xl border border-line bg-panel p-1.5 shadow-[0_12px_28px_-12px_rgba(16,19,26,0.18)]"
           >
             {videos.length > 0 && (
               <p className="px-2 pt-1 pb-1.5 text-[11px] font-semibold tracking-[0.07em] text-ink-faint uppercase">

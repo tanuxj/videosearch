@@ -2,8 +2,7 @@ import { useEffect } from 'react'
 import { AuthProvider, useAuth } from './lib/auth'
 import { Link, useNavigate, useRoute } from './lib/router'
 import { MarketingShell } from './components/Shell'
-import { AuroraBackground, GridPattern } from './components/ui/Backgrounds'
-import { GlowButton } from './components/ui/Button'
+import { ButtonLink } from './components/ui/Button'
 import { Eyebrow } from './components/ui/Text'
 import Home from './pages/Home'
 import Login from './pages/Login'
@@ -17,24 +16,23 @@ const AUTH_ONLY = new Set(['/login', '/signup'])
 function NotFound() {
   return (
     <MarketingShell>
-      <AuroraBackground className="px-6 py-24 text-center">
-        <GridPattern />
+      <section className="px-6 py-24 text-center">
         <Eyebrow>
-          <span className="font-mono font-semibold">404</span>
+          <span className="font-medium">404</span>
           Page not found
         </Eyebrow>
-        <h1 className="mx-auto mt-6 max-w-[20ch] text-[clamp(2rem,5vw,3.2rem)] leading-[1.05] font-bold tracking-[-0.035em] text-ink">
+        <h1 className="mx-auto mt-6 max-w-[20ch] text-[clamp(1.9rem,4.5vw,2.9rem)] leading-[1.08] font-semibold tracking-[-0.03em] text-ink">
           This page doesn’t exist
         </h1>
-        <p className="mx-auto mt-4 max-w-[52ch] text-[16px] leading-relaxed text-ink-mid">
+        <p className="mx-auto mt-4 max-w-[52ch] text-[15.5px] leading-relaxed text-ink-mid">
           The link may be out of date. Head back and pick up where you left off.
         </p>
-        <div className="mt-8 flex justify-center">
-          <GlowButton as={Link} to="/">
+        <div className="mt-7 flex justify-center">
+          <ButtonLink as={Link} to="/" size="lg">
             Back to home
-          </GlowButton>
+          </ButtonLink>
         </div>
-      </AuroraBackground>
+      </section>
     </MarketingShell>
   )
 }

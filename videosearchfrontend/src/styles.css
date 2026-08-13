@@ -64,24 +64,10 @@
   --font-sans: var(--font);
   --font-mono: var(--mono);
 
-  /* Motion used by the new components. Keep durations calm — this is a light
-     UI, so movement should read as depth, not decoration. */
-  --animate-aurora: aurora 18s ease-in-out infinite alternate;
-  --animate-shimmer: shimmer 2.2s linear infinite;
-  --animate-marquee: marquee 42s linear infinite;
-  --animate-glow-line: glow-line 3.4s ease-in-out infinite;
-}
-
-@keyframes aurora {
-  0% {
-    transform: translate3d(-6%, -3%, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(5%, 4%, 0) scale(1.08);
-  }
-  100% {
-    transform: translate3d(-3%, 5%, 0) scale(1.03);
-  }
+  /* The only decorative animation left. Everything else that moves does so to
+     orient the reader (a dialog entering, a dropdown opening) and is handled by
+     motion/react at the component that owns it. */
+  --animate-shimmer: shimmer 1.6s linear infinite;
 }
 
 @keyframes shimmer {
@@ -93,23 +79,19 @@
   }
 }
 
-@keyframes marquee {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    /* Half, because the track renders its children twice for a seamless loop. */
-    transform: translateX(-50%);
-  }
-}
-
-@keyframes glow-line {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-  50% {
-    opacity: 1;
+@layer base {
+  /* Safety net for icons.
+     `components/Icons.tsx` renders bare <svg viewBox="0 0 24 24"> with no
+     width/height, and every sizing rule in index.css was scoped to a legacy
+     class name (`.btn svg`, `.side-link svg`, …) that the rebuild removed. An
+     SVG with no intrinsic size falls back to 300x150, so a single missed
+     `[&_svg]:size-*` would blow the layout apart. Scaling to the text context
+     keeps icons sane by default; because this sits in `base`, any explicit
+     size utility still wins. */
+  svg {
+    width: 1.15em;
+    height: 1.15em;
+    flex-shrink: 0;
   }
 }
 

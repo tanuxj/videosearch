@@ -237,7 +237,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
             onDragLeave={() => setDragging(false)}
             onDrop={onDrop}
             className={cn(
-              'flex flex-col items-center rounded-2xl border-2 border-dashed px-6 py-10 text-center',
+              'flex flex-col items-center rounded-xl border-2 border-dashed px-6 py-10 text-center',
               'transition-[border-color,background-color] duration-200',
               dragging
                 ? 'border-brand bg-brand-wash'
@@ -246,7 +246,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
           >
             <span
               className={cn(
-                'mb-4 grid size-14 place-items-center rounded-2xl border transition-transform duration-200 [&_svg]:size-6',
+                'mb-4 grid size-12 place-items-center rounded-full border transition-transform duration-200 [&_svg]:size-6',
                 dragging
                   ? 'scale-105 border-brand bg-panel text-brand'
                   : 'border-brand-line bg-brand-wash text-brand',
@@ -286,7 +286,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
         ) : (
           <>
             <div className="flex items-center gap-3 rounded-xl border border-line bg-surface-soft p-3">
-              <span className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-lg border border-line bg-[linear-gradient(135deg,var(--bg-sunk),color-mix(in_oklab,var(--accent)_12%,var(--bg-sunk)))] text-brand [&_svg]:size-5">
+              <span className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-lg border border-line bg-surface-sunk text-brand [&_svg]:size-5">
                 {video.poster ? (
                   <img
                     src={video.poster}
@@ -310,7 +310,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                     the bar reads as one scale rather than fill-on-grey. */}
                 <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-brand-wash">
                   <i
-                    className="block h-full rounded-full bg-[linear-gradient(90deg,var(--accent),var(--accent-2))] transition-[width] duration-300"
+                    className="block h-full rounded-full bg-brand transition-[width] duration-300"
                     style={{ width: `${progress}%` }}
                   />
                 </div>

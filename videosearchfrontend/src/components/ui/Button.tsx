@@ -1,37 +1,33 @@
 /**
- * Buttons and link-buttons for the redesigned surfaces.
+ * Buttons and link-buttons.
  *
- * These intentionally do not reuse the legacy `.btn` classes — mixing the two
- * on one element means fighting `index.css` over padding and font. New markup
- * uses these; anything still on `.btn` keeps working untouched.
+ * Flat by design: one solid brand fill, one bordered variant, one quiet variant.
+ * No gradients, no inset highlights, no glow — the only depth cue is a hairline
+ * border, and hover just shifts the background a step.
+ *
+ * These intentionally do not reuse the legacy `.btn` classes — mixing the two on
+ * one element means fighting `index.css` over padding and font.
  */
 
 import type { ComponentPropsWithoutRef, ElementType, ReactNode } from 'react'
 import { cn } from '../../lib/cn'
 
+// Fully-rounded pills at every size, matching the reference UI.
 const SIZES = {
-  sm: 'h-9 px-3.5 text-[13px] rounded-[10px] gap-1.5',
-  md: 'h-10 px-4 text-[14px] rounded-[11px] gap-2',
-  lg: 'h-12 px-6 text-[15px] rounded-[13px] gap-2',
+  sm: 'h-8 px-3 text-[13px] gap-1.5',
+  md: 'h-9 px-4 text-[13.5px] gap-2',
+  lg: 'h-11 px-5 text-[14.5px] gap-2',
 } as const
 
 const VARIANTS = {
-  /** Brand fill with a lit top edge — the one primary action per view. */
-  primary: cn(
-    'text-white bg-[linear-gradient(180deg,color-mix(in_oklab,var(--accent)_92%,white),var(--accent))]',
-    'shadow-[0_1px_0_rgba(255,255,255,0.28)_inset,0_10px_24px_-12px_color-mix(in_oklab,var(--accent)_65%,transparent)]',
-    'hover:brightness-[1.06] active:brightness-[0.97]',
-  ),
-  /** Bordered, panel-coloured. */
-  secondary: cn(
-    'text-ink bg-panel border border-line-strong',
-    'shadow-[0_1px_2px_rgba(16,19,26,0.05)]',
-    'hover:border-brand-line hover:bg-surface-soft',
-  ),
+  /** The one primary action in a view. */
+  primary: 'text-white bg-brand hover:bg-brand-hover',
+  /** Bordered and white — the default for everything else. */
+  secondary: 'text-ink bg-panel border border-line-strong hover:bg-surface-soft',
   /** No chrome until hovered. */
-  ghost: 'text-ink-mid hover:text-ink hover:bg-surface-sunk',
+  ghost: 'text-ink-mid hover:bg-surface-sunk hover:text-ink',
   /** Destructive. */
-  danger: 'text-white bg-danger hover:brightness-[1.06]',
+  danger: 'text-white bg-danger hover:brightness-95',
 } as const
 
 type ButtonBaseProps = {
@@ -42,10 +38,10 @@ type ButtonBaseProps = {
 }
 
 const BASE = cn(
-  'relative inline-flex items-center justify-center font-medium whitespace-nowrap',
-  'transition-[filter,background-color,border-color,color,transform] duration-150',
-  'active:translate-y-px',
-  'disabled:pointer-events-none disabled:opacity-55',
+  'relative inline-flex shrink-0 items-center justify-center rounded-full',
+  'font-medium whitespace-nowrap',
+  'transition-colors duration-150',
+  'disabled:pointer-events-none disabled:opacity-50',
   'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
 )
 
@@ -90,32 +86,32 @@ export function ButtonLink<T extends ElementType>({
   )
 }
 
-/**
- * CTA with a gradient hairline that pulses.
- *
- * The glow is a blurred copy of the button sitting behind it, which is why the
- * wrapper needs `isolate` — otherwise the blur bleeds over neighbours.
- */
-export function GlowButton({
-  className,
+/** Square icon-only control (toolbar buttons, overflow menus, close). */
+export function IconButton({
+  label,
   children,
-  as,
+  className,
   ...rest
-}: { as?: ElementType } & ButtonBaseProps &
-  Record<string, unknown>) {
-  const Tag = (as ?? 'button') as ElementType
+}: {
+  label: string
+  children: ReactNode
+  className?: string
+} & Omit<ComponentPropsWithoutRef<'button'>, 'aria-label'>) {
   return (
-    <span className="relative isolate inline-flex">
-      <span
-        aria-hidden="true"
-        className="animate-glow-line absolute -inset-1 -z-10 rounded-[18px] bg-[linear-gradient(100deg,var(--accent),var(--accent-2))] opacity-45 blur-lg"
-      />
-      <Tag
-        className={cn(BASE, SIZES.lg, VARIANTS.primary, className)}
-        {...rest}
-      >
-        {children}
-      </Tag>
-    </span>
+    <button
+      type="button"
+      aria-label={label}
+      className={cn(
+        'grid size-8 shrink-0 place-items-center rounded-full text-ink-dim',
+        'transition-colors hover:bg-surface-sunk hover:text-ink',
+        'disabled:pointer-events-none disabled:opacity-40',
+        'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
+        '[&_svg]:size-4',
+        className,
+      )}
+      {...rest}
+    >
+      {children}
+    </button>
   )
 }

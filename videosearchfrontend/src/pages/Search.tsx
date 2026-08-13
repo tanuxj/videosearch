@@ -18,9 +18,9 @@ import { VideoSelect } from '../components/VideoSelect'
 import { UploadDialog } from '../components/UploadDialog'
 import { ClipLightbox } from '../components/ClipLightbox'
 import { Button } from '../components/ui/Button'
-import { GlowBorderCard, SpotlightCard } from '../components/ui/Card'
+import { Card } from '../components/ui/Card'
 import { Chip, EmptyState, Panel } from '../components/ui/Data'
-import { Reveal, Shimmer } from '../components/ui/Motion'
+import { Shimmer } from '../components/ui/Motion'
 import { Spinner } from '../components/AuthLayout'
 import { PlayIcon, SearchIcon, SparkIcon, UploadIcon } from '../components/Icons'
 import { timecode } from '../lib/format'
@@ -179,10 +179,7 @@ export default function Search() {
     >
       <div className="mx-auto w-full max-w-[900px]">
         {/* ── Composer ─────────────────────────────────────── */}
-        <GlowBorderCard
-          className="shadow-[0_18px_46px_-26px_rgba(16,19,26,0.24)]"
-          innerClassName="p-3 sm:p-4"
-        >
+        <Card className="p-3 sm:p-4">
           <div className="flex flex-wrap items-center gap-2">
             <VideoSelect
               videos={videos}
@@ -251,7 +248,7 @@ export default function Search() {
               {searching ? 'Searching' : 'Find clips'}
             </Button>
           </div>
-        </GlowBorderCard>
+        </Card>
 
         {selected && !src && selected.status !== 'failed' && (
           <p className="mt-3 flex flex-wrap items-center gap-x-1.5 gap-y-1 px-1 text-[13px] text-ink-dim">
@@ -348,8 +345,9 @@ export default function Search() {
                 const topScore = Math.max(...clips.map((c) => c.score))
                 const percent = Math.round((clip.score / Math.max(topScore, 0.001)) * 100)
                 return (
-                  <Reveal key={clip.id} y={10} delay={index * 0.028}>
-                    <SpotlightCard className="h-full">
+                  // `group` is required here — the play overlay below reveals
+                  // itself with `group-hover`.
+                  <Card key={clip.id} className="group h-full" interactive>
                       <button
                         type="button"
                         onClick={() => setOpenClip(clip)}
@@ -363,23 +361,23 @@ export default function Search() {
                               className="size-full object-cover"
                             />
                           ) : (
-                            <span className="grid size-full place-items-center bg-[linear-gradient(135deg,var(--bg-sunk),color-mix(in_oklab,var(--accent)_12%,var(--bg-sunk)))] text-brand [&_svg]:size-6">
+                            <span className="grid size-full place-items-center bg-surface-sunk text-brand [&_svg]:size-6">
                               <PlayIcon />
                             </span>
                           )}
 
                           {/* Rank — the only place the result's position is stated. */}
-                          <span className="absolute top-2 left-2 rounded-md bg-ink/72 px-1.5 py-0.5 font-mono text-[11px] font-medium text-white backdrop-blur-sm">
+                          <span className="absolute top-2 left-2 rounded-md bg-ink/70 px-1.5 py-0.5 font-mono text-[11px] font-medium text-white">
                             #{index + 1}
                           </span>
 
                           <span className="absolute inset-0 grid place-items-center bg-ink/0 opacity-0 transition-[opacity,background-color] duration-200 group-hover:bg-ink/20 group-hover:opacity-100">
-                            <i className="grid size-11 place-items-center rounded-full bg-panel/90 text-brand shadow-[0_8px_20px_-8px_rgba(16,19,26,0.45)] backdrop-blur [&_svg]:size-5">
+                            <i className="grid size-11 place-items-center rounded-full bg-panel text-brand [&_svg]:size-5">
                               <PlayIcon />
                             </i>
                           </span>
 
-                          <span className="absolute right-2 bottom-2 rounded-md bg-ink/72 px-1.5 py-0.5 font-mono text-[11px] text-white backdrop-blur-sm">
+                          <span className="absolute right-2 bottom-2 rounded-md bg-ink/70 px-1.5 py-0.5 font-mono text-[11px] text-white">
                             {timecode(clip.start)} – {timecode(clip.end)}
                           </span>
                         </span>
@@ -396,7 +394,7 @@ export default function Search() {
                           <span className="mt-2 flex items-center gap-2">
                             <span className="relative block h-1.5 flex-1 overflow-hidden rounded-full bg-brand-wash">
                               <i
-                                className="absolute inset-y-0 left-0 rounded-full bg-[linear-gradient(90deg,var(--accent),var(--accent-2))]"
+                                className="absolute inset-y-0 left-0 rounded-full bg-brand"
                                 style={{ width: `${percent}%` }}
                               />
                             </span>
@@ -406,8 +404,7 @@ export default function Search() {
                           </span>
                         </span>
                       </button>
-                    </SpotlightCard>
-                  </Reveal>
+                    </Card>
                 )
               })}
             </div>
@@ -430,9 +427,8 @@ export default function Search() {
 
           {selected ? (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
-              {SUGGESTIONS.map((suggestion, index) => (
-                <Reveal key={suggestion} y={8} delay={index * 0.04}>
-                  <SpotlightCard className="h-full">
+              {SUGGESTIONS.map((suggestion) => (
+                <Card key={suggestion} className="h-full" interactive>
                     <button
                       type="button"
                       onClick={() => {
@@ -448,8 +444,7 @@ export default function Search() {
                         {suggestion}
                       </span>
                     </button>
-                  </SpotlightCard>
-                </Reveal>
+                  </Card>
               ))}
             </div>
           ) : (

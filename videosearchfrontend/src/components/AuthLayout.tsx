@@ -2,8 +2,7 @@ import { useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Brand } from './Shell'
 import { cn } from '../lib/cn'
-import { AuroraBackground, DotPattern } from './ui/Backgrounds'
-import { GlowBorderCard } from './ui/Card'
+import { Card } from './ui/Card'
 
 /* ── Text field ─────────────────────────────────────────── */
 
@@ -54,7 +53,7 @@ export function Field({
         className={cn(
           'flex items-center gap-2.5 rounded-xl border bg-panel px-3.5',
           'transition-[border-color,box-shadow] duration-150',
-          'focus-within:border-brand focus-within:shadow-[0_0_0_4px_color-mix(in_oklab,var(--accent)_13%,transparent)]',
+          'focus-within:border-brand focus-within:shadow-[var(--ring)]',
           '[&>svg]:size-[17px] [&>svg]:shrink-0 [&>svg]:text-ink-faint',
           error ? 'border-danger' : 'border-line-strong',
         )}
@@ -116,42 +115,37 @@ export function AuthLayout({ children }: { children: ReactNode }) {
 
       {/* Showcase side — hidden on narrow screens where it would just push the
           form below the fold. */}
-      <AuroraBackground className="hidden flex-col justify-center border-l border-line bg-surface-soft px-10 py-12 lg:flex">
-        <DotPattern className="opacity-70" />
-
-        <GlowBorderCard innerClassName="p-7">
-          <blockquote className="text-[19px] leading-relaxed font-medium tracking-[-0.015em] text-ink">
+      <aside className="hidden flex-col justify-center border-l border-line bg-surface-soft px-10 py-12 lg:flex">
+        <Card className="p-7">
+          <blockquote className="text-[18px] leading-relaxed text-ink">
             “We stopped scrubbing through raw footage entirely. You describe the
             shot you remember, and it’s just there.”
           </blockquote>
           <footer className="mt-6 flex items-center gap-3">
-            <span className="grid size-10 shrink-0 place-items-center rounded-full bg-[linear-gradient(135deg,var(--accent),var(--accent-2))] text-[13px] font-semibold text-white">
+            <span className="grid size-9 shrink-0 place-items-center rounded-full bg-brand text-[12.5px] font-semibold text-white">
               RM
             </span>
             <div className="text-[13px] leading-snug">
-              <b className="font-semibold text-ink">Rae Mercado</b>
+              <b className="font-medium text-ink">Rae Mercado</b>
               <span className="text-ink-dim"> · Post-production lead</span>
               <div className="text-ink-faint">Northlight Studios</div>
             </div>
           </footer>
-        </GlowBorderCard>
+        </Card>
 
-        <div className="mt-6 grid grid-cols-3 gap-3">
+        <div className="mt-3 grid grid-cols-3 gap-3">
           {STATS.map((stat) => (
-            <div
-              key={stat.label}
-              className="rounded-xl border border-line bg-panel/70 p-4 text-center backdrop-blur"
-            >
-              <b className="block font-mono text-[19px] font-semibold tracking-[-0.02em] text-ink">
+            <Card key={stat.label} className="p-4 text-center">
+              <b className="block text-[18px] font-semibold tracking-[-0.02em] text-ink">
                 {stat.value}
               </b>
               <span className="mt-0.5 block text-[11.5px] text-ink-faint">
                 {stat.label}
               </span>
-            </div>
+            </Card>
           ))}
         </div>
-      </AuroraBackground>
+      </aside>
     </div>
   )
 }
@@ -167,10 +161,10 @@ export function AuthHead({
 }) {
   return (
     <div className="mb-7">
-      <h1 className="text-[27px] leading-tight font-bold tracking-[-0.03em] text-ink">
+      <h1 className="text-[25px] leading-tight font-semibold tracking-[-0.025em] text-ink">
         {title}
       </h1>
-      <p className="mt-2 text-[14.5px] text-ink-dim">{children}</p>
+      <p className="mt-2 text-[14px] text-ink-dim">{children}</p>
     </div>
   )
 }
@@ -180,7 +174,7 @@ export function Alert({ children }: { children: ReactNode }) {
   return (
     <p
       role="alert"
-      className="rounded-xl border border-danger/25 bg-danger-wash px-3.5 py-2.5 text-[13px] text-danger"
+      className="rounded-lg bg-danger-wash px-3.5 py-2.5 text-[13px] text-danger"
     >
       {children}
     </p>

@@ -83,7 +83,7 @@ export function LogoMark({ size = 32, className }: Props) {
  * connecting word can carry the gradient; any other name renders as-is.
  */
 const WORDMARK =
-  'text-[16.5px] font-bold tracking-[-0.03em] text-ink whitespace-nowrap'
+  'text-[15.5px] font-semibold tracking-[-0.02em] text-ink whitespace-nowrap'
 
 export function Wordmark({ name }: { name: string }) {
   const parts = /^(search)(in)(video)$/i.exec(name)
@@ -92,9 +92,8 @@ export function Wordmark({ name }: { name: string }) {
   return (
     <span className={WORDMARK}>
       {parts[1]}
-      <em className="bg-[linear-gradient(100deg,var(--accent),var(--accent-2))] bg-clip-text not-italic text-transparent">
-        {parts[2]}
-      </em>
+      {/* The connecting word carries the brand colour — flat, no gradient. */}
+      <em className="text-brand not-italic">{parts[2]}</em>
       {parts[3]}
     </span>
   )

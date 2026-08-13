@@ -13,7 +13,6 @@ import {
   StatRow,
   StatTile,
 } from '../components/ui/Data'
-import { Reveal } from '../components/ui/Motion'
 import {
   ClockIcon,
   FilmIcon,
@@ -70,8 +69,7 @@ export default function Dashboard() {
       }
     >
       <div className="flex flex-col gap-5">
-        <Reveal y={10}>
-          <StatRow>
+        <StatRow>
             <StatTile
               label="Videos"
               value={String(videos.length)}
@@ -97,10 +95,8 @@ export default function Dashboard() {
               icon={<SearchIcon />}
             />
           </StatRow>
-        </Reveal>
-
-        <Reveal y={10} delay={0.06}>
-          <Panel
+        
+        <Panel
             title="Your videos"
             subtitle="Pick one to search, or add something new."
             actions={
@@ -137,7 +133,7 @@ export default function Dashboard() {
                     key={video.id}
                     className="group flex flex-wrap items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-soft sm:px-5"
                   >
-                    <span className="grid size-14 shrink-0 place-items-center overflow-hidden rounded-xl border border-line bg-[linear-gradient(135deg,var(--bg-sunk),color-mix(in_oklab,var(--accent)_12%,var(--bg-sunk)))] text-brand [&_svg]:size-5">
+                    <span className="grid size-14 shrink-0 place-items-center overflow-hidden rounded-xl border border-line bg-surface-sunk text-brand [&_svg]:size-5">
                       {video.poster ? (
                         <img
                           src={video.poster}
@@ -213,8 +209,7 @@ export default function Dashboard() {
               </ul>
             )}
           </Panel>
-        </Reveal>
-      </div>
+              </div>
 
       <UploadDialog
         open={uploadOpen}

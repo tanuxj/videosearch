@@ -43,7 +43,7 @@ export function Modal({
     <AnimatePresence>
       {open && (
         <motion.div
-          className="fixed inset-0 z-[100] grid place-items-center overflow-y-auto bg-ink/25 p-4 backdrop-blur-[3px]"
+          className="fixed inset-0 z-[100] grid place-items-center overflow-y-auto bg-ink/20 p-4"
           onMouseDown={onClose}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -61,7 +61,7 @@ export function Modal({
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             className={cn(
               'relative w-full overflow-hidden rounded-2xl border border-line bg-panel',
-              'shadow-[0_30px_70px_-24px_rgba(16,19,26,0.35)]',
+              'shadow-[0_16px_40px_-16px_rgba(16,19,26,0.18)]',
               variant === 'stage' ? 'max-w-[1080px]' : 'max-w-[520px]',
             )}
           >
