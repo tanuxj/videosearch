@@ -9,6 +9,7 @@ import math
 import shutil
 import tempfile
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import Annotated
 
@@ -81,15 +82,16 @@ def _plan_parts(size_bytes: int) -> tuple[int, int]:
     return part_size, part_count
 
 
-def _cleanup_clip_files(source: Path, temp_dir: Path) -> None:
-    """Remove the clip output dir and any R2 temp download after streaming.
+def _cleanup_clip_files(source: str | None, temp_dir: Path) -> None:
+    """Remove the clip output dir, and the source only when we created it.
 
-    `source` is the live stored file on the local backend (must be kept) and
-    a private temp copy on R2 (must be removed). The `temp_dir` always holds
-    our clip output and is always ours to delete.
+    `source` is a temp download we own and must delete. It is None whenever the
+    source was a presigned URL (nothing local) or the live stored file on the
+    local backend (must be kept). The `temp_dir` always holds our clip output
+    and is always ours to delete.
     """
-    if storage.backend == "r2" and source.is_file():
-        source.unlink(missing_ok=True)
+    if source is not None:
+        Path(source).unlink(missing_ok=True)
     shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -568,13 +570,26 @@ async def download_clip(
             detail=f"Clip is longer than the {MAX_CLIP_SECONDS:.0f}s limit",
         )
 
-    # ffmpeg needs a local file: R2 objects are pulled down to a temp file.
-    source = await run_in_threadpool(storage.get_local_path, video.storage_key)
+    # ffmpeg reads the source itself. On R2 that is a presigned URL, so it
+    # range-requests only the bytes around the cut instead of downloading the
+    # whole object — the difference between seconds and minutes on a large file.
+    # A statically linked ffmpeg segfaults on URL input, so only offer one when
+    # the resolved binary can actually open a network source.
+    ffmpeg_source, owns_source = await run_in_threadpool(
+        partial(
+            storage.ffmpeg_source,
+            video.storage_key,
+            settings.presign_url_ttl_seconds,
+            allow_url=clips.supports_network_input(),
+        )
+    )
+    # Only a temp download is ours to delete; a URL or the live local file is not.
+    source: str | None = ffmpeg_source if owns_source else None
     temp_dir = Path(tempfile.mkdtemp(prefix="videosearch-clip-"))
     output = temp_dir / f"clip-{video_id}.mp4"
     try:
         try:
-            await run_in_threadpool(clips.trim, source, start, end, output)
+            await run_in_threadpool(clips.trim, ffmpeg_source, start, end, output)
         except clips.ClipError as exc:
             raise HTTPException(
                 status_code=503,

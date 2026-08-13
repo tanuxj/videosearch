@@ -6,6 +6,20 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.17 /uv /uvx /bin/
 
 WORKDIR /app
 
+# System ffmpeg, dynamically linked.
+#
+# `imageio-ffmpeg` already ships a static build, and it is fine for local files
+# — but static glibc cannot resolve hostnames (`getaddrinfo` has to `dlopen` the
+# NSS modules, which a static binary has no loader for), so it **segfaults** on
+# any http(s) input. Clip extraction needs URL input: it lets ffmpeg range-
+# request the few seconds it is cutting instead of downloading the whole object,
+# which took ~16 minutes on a 1.4 GB video and now takes ~6 seconds.
+#
+# Above the dependency layer on purpose: this rarely changes, so it stays cached.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PYTHONDONTWRITEBYTECODE=1 \

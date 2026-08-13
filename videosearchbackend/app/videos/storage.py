@@ -103,6 +103,49 @@ class Storage:
             ExpiresIn=expires_in,
         )
 
+    def presign_get(self, key: str, expires_in: int) -> str | None:
+        """A short-lived URL that reads the object, for tools that speak HTTP.
+
+        Used by the clip trimmer so ffmpeg can range-request the segment it
+        needs straight from R2. The alternative — ``get_local_path`` — pulls the
+        entire object down first, which on a 1.4 GB video costs minutes of
+        transfer to keep a few seconds of it.
+
+        Returns None on the local backend, where there is no HTTP endpoint and
+        the caller should use the file path instead.
+        """
+        if self._client is None:
+            return None
+        assert self._bucket is not None
+        return self._client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self._bucket, "Key": key},
+            ExpiresIn=expires_in,
+        )
+
+    def ffmpeg_source(
+        self, key: str, expires_in: int, *, allow_url: bool = True
+    ) -> tuple[str, bool]:
+        """A source ffmpeg can read, plus whether the caller must clean it up.
+
+        Returns ``(source, is_temp_file)``:
+
+        * R2 with ``allow_url`` — a presigned URL, nothing to delete.
+        * Local disk — the stored file's own path, which must **not** be deleted.
+        * R2 without ``allow_url`` — a full temp download, which the caller owns.
+
+        Pass ``allow_url=False`` when the ffmpeg build cannot read network
+        sources (see ``clips.supports_network_input``); the download is far
+        slower but it is the only thing that works with a static binary.
+        """
+        if self._client is None:
+            return str(self._local_path(key)), False
+        if allow_url:
+            url = self.presign_get(key, expires_in)
+            if url is not None:
+                return url, False
+        return str(self.get_local_path(key)), True
+
     def object_size(self, key: str) -> int | None:
         """Byte size of the stored object, or None when it does not exist."""
         if self._client is not None:
