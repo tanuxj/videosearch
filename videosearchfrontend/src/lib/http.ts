@@ -11,10 +11,29 @@
  * Concurrent 401s share a single refresh call rather than stampeding it.
  */
 
-const API_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
+const RAW_API_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
+
+/**
+ * Same-origin mode: call the API through the page's own origin.
+ *
+ * This exists because the refresh cookie is host-only with `SameSite=Lax`. Point
+ * the browser at `localhost:5174` while the API is addressed as
+ * `127.0.0.1:3006` and those are *different sites*, so the browser refuses to
+ * attach the cookie to the `POST /auth/refresh` — Lax allows top-level
+ * navigations only. Refresh then 401s and the session dies the moment the
+ * 15-minute access token expires, which looks exactly like "refresh is broken".
+ *
+ * With this on, `vite.config.ts` proxies `/api` to the backend, so the request
+ * never leaves the page's origin: the cookie is first-party, SameSite stops
+ * mattering, and it works whichever hostname you happen to type.
+ */
+const SAME_ORIGIN = import.meta.env.VITE_API_SAME_ORIGIN === 'true'
+
+/** '' means "relative to this origin", which is what the dev proxy wants. */
+const API_URL = SAME_ORIGIN ? '' : RAW_API_URL
 
 /** False when no backend is configured — the app then runs on local demo auth. */
-export const API_ENABLED = Boolean(API_URL)
+export const API_ENABLED = SAME_ORIGIN || Boolean(RAW_API_URL)
 
 export type ApiUser = {
   id: string
