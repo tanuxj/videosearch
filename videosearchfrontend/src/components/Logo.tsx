@@ -1,11 +1,31 @@
 /**
- * Brand mark — a search lens with a play glyph centred in it, on a gradient
- * tile. Kept identical to `public/favicon.svg` so the tab icon and the header
- * never drift apart; edit both together.
+ * Brand mark — a play glyph above a scrubber: *a moment located on a timeline*,
+ * which is the one thing this product does.
  *
- * The glyph geometry is deliberate: the triangle's centroid sits exactly on
- * the lens centre (14.4, 14.4), so it reads as balanced down to 16px.
+ * Kept identical to `public/favicon.svg` so the tab icon and the header never
+ * drift apart; edit both together.
+ *
+ * ## Why it is this simple
+ *
+ * The previous mark stacked six shapes — gradient tile, radial sheen, inner
+ * hairline, lens circle, lens handle, triangle — inside a tile that renders at
+ * **20px** in the sidebar. At that size the lens was ~8px across carrying a
+ * 2.6-unit stroke, with a 3.5px triangle inside it: unreadable by construction.
+ * This version is three shapes and survives 16px.
+ *
+ * It also drops the indigo→violet gradient, which stopped being on-brand when
+ * the UI moved to one flat blue.
+ *
+ * Geometry notes: the triangle's centroid sits at x≈15.8 rather than 16 — a
+ * right-pointing triangle looks centred only when nudged slightly left of true
+ * centre. The bar is drawn as a translucent full-width track with an opaque
+ * segment laid over it, rather than two adjacent rects, so no seam artefact
+ * appears at the join when the mark is scaled down.
  */
+
+/** Brand blue. Literal, not a token: a logo should not re-theme, and this has
+ *  to match `public/favicon.svg`, which cannot read CSS variables. */
+const BRAND = '#2563EB'
 
 type Props = {
   /** Rendered size in px. The artwork is drawn on a 32-unit grid. */
@@ -23,57 +43,28 @@ export function LogoMark({ size = 32, className }: Props) {
       role="img"
       aria-hidden="true"
     >
-      <defs>
-        <linearGradient
-          id="sivTile"
-          x1="0"
-          y1="0"
-          x2="32"
-          y2="32"
-          gradientUnits="userSpaceOnUse"
-        >
-          <stop offset="0" stopColor="#6366F1" />
-          <stop offset=".55" stopColor="#7C5CF5" />
-          <stop offset="1" stopColor="#9333EA" />
-        </linearGradient>
-        <radialGradient
-          id="sivSheen"
-          cx="0"
-          cy="0"
-          r="1"
-          gradientUnits="userSpaceOnUse"
-          gradientTransform="translate(5 3) rotate(52) scale(30)"
-        >
-          <stop offset="0" stopColor="#fff" stopOpacity=".34" />
-          <stop offset="1" stopColor="#fff" stopOpacity="0" />
-        </radialGradient>
-      </defs>
+      <rect width="32" height="32" rx="7.5" fill={BRAND} />
 
-      <rect width="32" height="32" rx="8" fill="url(#sivTile)" />
-      <rect width="32" height="32" rx="8" fill="url(#sivSheen)" />
-      <rect
-        x=".5"
-        y=".5"
-        width="31"
-        height="31"
-        rx="7.5"
-        fill="none"
-        stroke="#fff"
-        strokeOpacity=".22"
-      />
-
-      <g fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round">
-        <circle cx="14.4" cy="14.4" r="6.9" />
-        <path d="M19.85 19.85 24 24" />
-      </g>
-
+      {/* The moment. */}
       <path
-        d="M12.5 11.5 18.3 14.4 12.5 17.3Z"
+        d="M12.8 8.6 21.8 14.2 12.8 19.8Z"
         fill="#fff"
         stroke="#fff"
-        strokeWidth="1.1"
+        strokeWidth="1.6"
         strokeLinejoin="round"
       />
+
+      {/* The timeline it was found on. */}
+      <rect
+        x="8.2"
+        y="23.1"
+        width="15.6"
+        height="2.6"
+        rx="1.3"
+        fill="#fff"
+        fillOpacity=".42"
+      />
+      <rect x="8.2" y="23.1" width="8.6" height="2.6" rx="1.3" fill="#fff" />
     </svg>
   )
 }

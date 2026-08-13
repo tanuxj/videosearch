@@ -6,58 +6,29 @@
   role="img"
   aria-label="SearchInVideo"
 >
-  <defs>
-    <linearGradient
-      id="siv-tile"
-      x1="0"
-      y1="0"
-      x2="32"
-      y2="32"
-      gradientUnits="userSpaceOnUse"
-    >
-      <stop offset="0" stop-color="#6366F1" />
-      <stop offset=".55" stop-color="#7C5CF5" />
-      <stop offset="1" stop-color="#9333EA" />
-    </linearGradient>
-    <radialGradient
-      id="siv-sheen"
-      cx="0"
-      cy="0"
-      r="1"
-      gradientUnits="userSpaceOnUse"
-      gradientTransform="translate(5 3) rotate(52) scale(30)"
-    >
-      <stop offset="0" stop-color="#fff" stop-opacity=".34" />
-      <stop offset="1" stop-color="#fff" stop-opacity="0" />
-    </radialGradient>
-  </defs>
+  <!--
+    Must stay identical to LogoMark in src/components/Logo.tsx — edit both
+    together. A play glyph above a scrubber: a moment located on a timeline.
+    Flat brand blue, three shapes, legible down to 16px.
+  -->
+  <rect width="32" height="32" rx="7.5" fill="#2563EB" />
 
-  <!-- Tile -->
-  <rect width="32" height="32" rx="8" fill="url(#siv-tile)" />
-  <rect width="32" height="32" rx="8" fill="url(#siv-sheen)" />
-  <rect
-    x=".5"
-    y=".5"
-    width="31"
-    height="31"
-    rx="7.5"
-    fill="none"
-    stroke="#fff"
-    stroke-opacity=".22"
-  />
-
-  <!-- Lens + handle -->
-  <g fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round">
-    <circle cx="14.4" cy="14.4" r="6.9" />
-    <path d="M19.85 19.85 24 24" />
-  </g>
-
-  <!-- Play glyph, centred in the lens -->
   <path
-    d="M12.5 11.5 18.3 14.4 12.5 17.3Z"
+    d="M12.8 8.6 21.8 14.2 12.8 19.8Z"
     fill="#fff"
     stroke="#fff"
-    stroke-width="1.1"
+    stroke-width="1.6"
     stroke-linejoin="round"
   />
+
+  <rect
+    x="8.2"
+    y="23.1"
+    width="15.6"
+    height="2.6"
+    rx="1.3"
+    fill="#fff"
+    fill-opacity=".42"
+  />
+  <rect x="8.2" y="23.1" width="8.6" height="2.6" rx="1.3" fill="#fff" />
 </svg>
