@@ -6,6 +6,7 @@ tests never touch a real R2 bucket.
 """
 
 import io
+import math
 
 import pytest
 from fastapi.testclient import TestClient
@@ -414,15 +415,35 @@ def test_delete_someone_elses_video_is_404(client: TestClient) -> None:
 
 
 class _FakeS3:
-    """Minimal boto3 stand-in so presign/complete can be tested without R2."""
+    """Minimal boto3 stand-in so presign/multipart/complete can be tested without R2."""
 
     def __init__(self, *, content_length: int | None = None) -> None:
         self._content_length = content_length
         self.last_generated: tuple | None = None
+        self.multipart: dict | None = None
+        self.completed: list[tuple] = []
+        self.aborted: list[tuple] = []
 
     def generate_presigned_url(self, method: str, Params: dict, ExpiresIn: int) -> str:
         self.last_generated = (method, Params, ExpiresIn)
         return "https://upload.example.com/fake?sig=abc"
+
+    def create_multipart_upload(self, Bucket: str, Key: str, ContentType: str) -> dict:
+        self.multipart = {"Bucket": Bucket, "Key": Key, "ContentType": ContentType}
+        return {"UploadId": "fake-upload-id"}
+
+    def complete_multipart_upload(
+        self, Bucket: str, Key: str, UploadId: str, MultipartUpload: dict
+    ) -> dict:
+        self.completed.append((Bucket, Key, UploadId, MultipartUpload))
+        return {"Location": "https://upload.example.com/fake-object"}
+
+    def abort_multipart_upload(self, Bucket: str, Key: str, UploadId: str) -> dict:
+        self.aborted.append((Bucket, Key, UploadId))
+        return {}
+
+    def delete_object(self, Bucket: str, Key: str) -> dict:
+        return {}
 
     def head_object(self, Bucket: str, Key: str) -> dict:
         if self._content_length is None:
@@ -626,5 +647,247 @@ def test_complete_someone_elses_video_is_404(
     response = client.post(
         f"/api/v1/videos/{video_id}/complete",
         headers={"Authorization": f"Bearer {_signin_other(client)}"},
+    )
+    assert response.status_code == 404
+
+
+# ── Presigned multipart upload (large files) ───────────────────
+
+
+def test_presign_multipart_reserves_video_and_returns_part_urls(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos.storage import storage
+
+    fake = _enable_presign(monkeypatch, storage)
+    headers = _auth_headers(client)
+
+    # 6 GiB — above the 5 GiB single-PUT cap, so it exercises chunk planning.
+    size_bytes = 6 * 1024 * 1024 * 1024
+    response = client.post(
+        "/api/v1/videos/presign/multipart",
+        headers=headers,
+        json={"filename": "big.mp4", "size_bytes": size_bytes, "content_type": "video/mp4"},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+
+    assert body["upload_id"] == "fake-upload-id"
+    assert body["video"]["status"] == "processing"
+    assert body["video"]["size_bytes"] == size_bytes
+    assert body["expires_in"] > 0
+
+    # Chunk plan: every non-final chunk is ≥ 5 MiB and there are ≤ 1000 chunks.
+    part_size = body["part_size"]
+    assert part_size >= 5 * 1024 * 1024
+    assert len(body["parts"]) == math.ceil(size_bytes / part_size)
+    assert len(body["parts"]) <= 1000
+    assert body["parts"][0]["part_number"] == 1
+    assert body["parts"][0]["url"].startswith("https://")
+    expected_numbers = list(range(1, len(body["parts"]) + 1))
+    assert [part["part_number"] for part in body["parts"]] == expected_numbers
+
+    # The multipart upload was opened against the row's object key.
+    assert fake.multipart["Key"].endswith(".mp4")
+    assert fake.multipart["ContentType"] == "video/mp4"
+
+    listing = client.get("/api/v1/videos", headers=headers).json()
+    assert [item["id"] for item in listing["items"]] == [body["video"]["id"]]
+
+
+def test_presign_multipart_small_file_gets_one_part(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos.storage import storage
+
+    _enable_presign(monkeypatch, storage)
+    headers = _auth_headers(client)
+
+    response = client.post(
+        "/api/v1/videos/presign/multipart",
+        headers=headers,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert len(body["parts"]) == 1
+    assert body["part_size"] >= 5 * 1024 * 1024
+
+
+def test_presign_multipart_rejected_when_storage_cannot_presign(
+    client: TestClient,
+) -> None:
+    headers = _auth_headers(client)
+    response = client.post(
+        "/api/v1/videos/presign/multipart",
+        headers=headers,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    )
+    assert response.status_code == 409
+    assert "multipart" in response.json()["detail"]
+
+
+def test_presign_multipart_requires_auth(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/videos/presign/multipart",
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    )
+    assert response.status_code == 401
+
+
+def test_presign_multipart_rejects_oversize(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos import service
+    from app.videos.storage import storage
+
+    monkeypatch.setattr(service, "MAX_UPLOAD_BYTES", 8)
+    _enable_presign(monkeypatch, storage)
+    headers = _auth_headers(client)
+
+    response = client.post(
+        "/api/v1/videos/presign/multipart",
+        headers=headers,
+        json={"filename": "big.mp4", "size_bytes": 64},
+    )
+    assert response.status_code == 413
+
+
+def test_presign_multipart_cleans_up_when_part_urls_fail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botocore.exceptions import ClientError
+
+    from app.videos.storage import storage
+
+    fake = _enable_presign(monkeypatch, storage)
+
+    def _explode(method: str, Params: dict, ExpiresIn: int) -> str:
+        if method == "upload_part":
+            raise ClientError(
+                {"Error": {"Code": "InternalError"}, "ResponseMetadata": {"HTTPStatusCode": 500}},
+                "GeneratePresignedUrl",
+            )
+        return "https://upload.example.com/fake?sig=abc"
+
+    fake.generate_presigned_url = _explode
+    headers = _auth_headers(client)
+
+    with pytest.raises(ClientError):
+        client.post(
+            "/api/v1/videos/presign/multipart",
+            headers=headers,
+            json={"filename": "big.mp4", "size_bytes": 6 * 1024 * 1024 * 1024},
+        )
+
+    # The multipart upload was aborted and the reserved row removed.
+    assert fake.aborted and fake.aborted[0][2] == "fake-upload-id"
+    assert client.get("/api/v1/videos", headers=headers).json()["count"] == 0
+
+
+def test_complete_multipart_confirms_and_starts_indexing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos import pipeline, routes
+    from app.videos.storage import storage
+
+    fake = _enable_presign(monkeypatch, storage, content_length=len(FAKE_MP4))
+    monkeypatch.setattr(routes.settings, "index_on_upload", True)
+    started: list = []
+    monkeypatch.setattr(
+        pipeline,
+        "index_video",
+        lambda video_id, source_path=None: started.append(video_id),
+    )
+    headers = _auth_headers(client)
+
+    reserved = client.post(
+        "/api/v1/videos/presign/multipart",
+        headers=headers,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    ).json()
+    video_id = reserved["video"]["id"]
+
+    response = client.post(
+        f"/api/v1/videos/{video_id}/complete/multipart",
+        headers=headers,
+        json={"upload_id": "fake-upload-id", "parts": [{"part_number": 1, "etag": '"abc123"'}]},
+    )
+    assert response.status_code == 200, response.text
+    assert "indexing" in response.json()["message"].lower()
+
+    # Parts were assembled in order, then the object size was verified.
+    assert fake.completed[0][2] == "fake-upload-id"
+    assert fake.completed[0][3]["Parts"] == [{"PartNumber": 1, "ETag": '"abc123"'}]
+    assert [str(item) for item in started] == [video_id]
+
+
+def test_complete_multipart_409_on_size_mismatch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos.storage import storage
+
+    _enable_presign(monkeypatch, storage, content_length=999)
+    headers = _auth_headers(client)
+    video_id = client.post(
+        "/api/v1/videos/presign/multipart",
+        headers=headers,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    ).json()["video"]["id"]
+
+    response = client.post(
+        f"/api/v1/videos/{video_id}/complete/multipart",
+        headers=headers,
+        json={"upload_id": "fake-upload-id", "parts": [{"part_number": 1, "etag": '"x"'}]},
+    )
+    assert response.status_code == 409
+    assert "does not match" in response.json()["detail"]
+
+
+def test_complete_multipart_409_when_parts_fail_to_assemble(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos.storage import storage
+
+    _enable_presign(monkeypatch, storage, content_length=len(FAKE_MP4))
+    monkeypatch.setattr(
+        storage,
+        "complete_multipart",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("InvalidPart")),
+    )
+    headers = _auth_headers(client)
+    video_id = client.post(
+        "/api/v1/videos/presign/multipart",
+        headers=headers,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    ).json()["video"]["id"]
+
+    response = client.post(
+        f"/api/v1/videos/{video_id}/complete/multipart",
+        headers=headers,
+        json={"upload_id": "fake-upload-id", "parts": [{"part_number": 1, "etag": '"x"'}]},
+    )
+    assert response.status_code == 409
+    assert "Could not assemble" in response.json()["detail"]
+
+
+def test_complete_multipart_someone_elses_video_is_404(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.videos.storage import storage
+
+    _enable_presign(monkeypatch, storage, content_length=len(FAKE_MP4))
+    mine = _auth_headers(client)
+    video_id = client.post(
+        "/api/v1/videos/presign/multipart",
+        headers=mine,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4)},
+    ).json()["video"]["id"]
+    _auth_headers(client, email="other@example.com", name="Other Person")
+
+    response = client.post(
+        f"/api/v1/videos/{video_id}/complete/multipart",
+        headers={"Authorization": f"Bearer {_signin_other(client)}"},
+        json={"upload_id": "fake-upload-id", "parts": [{"part_number": 1, "etag": '"x"'}]},
     )
     assert response.status_code == 404

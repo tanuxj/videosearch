@@ -11,13 +11,16 @@ upload. Design notes:
   more than a few dozen decoded frames in memory.
 * **Real progress.** ``frames_total`` is set up front (from the file's frame
   count) and ``frames_indexed`` increments per chunk, so the frontend's
-  status poll shows live progress.
+  status poll shows live progress. With scene-aware sampling the up-front
+  count is the fixed-rate estimate, so the consumer re-projects it from the
+  keep/candidate ratio each chunk and it converges to the real count.
 * **Failure is explicit.** Any exception marks the video ``failed`` with the
   error message instead of leaving it stuck in ``processing`` forever.
 """
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from pathlib import Path
@@ -81,20 +84,48 @@ def probe_file(path: Path) -> tuple[float, float, int]:
     return duration, step, expected
 
 
-def _process_video(path: Path, step: int, emit) -> tuple[int, float, float]:
+def _scene_key(frame: np.ndarray) -> np.ndarray:
+    """Tiny grayscale proxy of a frame, used to compare successive samples.
+
+    36×64 downscaled gray is a few hundred bytes and `mean abs diff` on it is
+    far cheaper than the CLIP embed it can skip — an obvious cost to pay on
+    static-heavy footage.
+    """
+    return cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (64, 36))
+
+
+def _process_video(
+    path: Path,
+    step: int,
+    emit,
+    *,
+    scene_aware: bool,
+    scene_threshold: float,
+    max_gap_frames: int,
+) -> tuple[int, float, float]:
     """Worker-thread body: decode + embed + emit chunks.
 
     Returns (frames_indexed, decode_seconds, embed_seconds) — the split is
     logged on completion so a slow index can be attributed without a profiler.
 
-    `emit(timestamps, embeddings)` is called on the worker thread with one chunk
-    at a time; the async caller bridges it onto the event loop.
+    `emit(timestamps, embeddings, kept, candidates)` is called on the worker
+    thread with one chunk at a time; the async caller bridges it onto the event
+    loop. `kept`/`candidates` are running totals so the caller can re-estimate
+    the progress denominator when scene-aware sampling is on (the up-front
+    metadata count is the fixed-rate estimate, not what will be embedded).
 
     Decoding is a single forward pass: ``grab()`` advances the demuxer without
     decoding and only sampled frames are ``retrieve()``d. Seeking per frame
     instead (``CAP_PROP_POS_FRAMES``) forces a re-decode from the preceding
     keyframe on every read, which measured ~2x slower even on a keyframe-dense
     file and far worse on normal H.264.
+
+    Scene-aware sampling: a candidate is kept when its mean absolute pixel
+    difference (on the grayscale proxy) vs the last kept frame reaches
+    ``scene_threshold``, or when ``max_gap_frames`` candidates have passed
+    since the last keep — so a 10-minute static shot still contributes a few
+    frames, while a cut-heavy movie keeps every meaningful change and drops
+    the redundant in-between frames CLIP would otherwise embed for nothing.
     """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -108,12 +139,16 @@ def _process_video(path: Path, step: int, emit) -> tuple[int, float, float]:
         frame_index = 0
         embed_seconds = 0.0
         started = time.perf_counter()
+        kept = 0
+        candidates = 0
+        since_keep = 0
+        last_key: np.ndarray | None = None
 
         def flush() -> tuple[int, float]:
             embed_started = time.perf_counter()
             embeddings = embedder.embed_images(frames)
             elapsed = time.perf_counter() - embed_started
-            emit(list(timestamps), embeddings)
+            emit(list(timestamps), embeddings, kept, candidates)
             count = len(timestamps)
             frames.clear()
             timestamps.clear()
@@ -124,12 +159,29 @@ def _process_video(path: Path, step: int, emit) -> tuple[int, float, float]:
                 ok, frame = cap.retrieve()
                 if not ok:
                     break
-                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                timestamps.append(frame_index / fps)
-                if len(frames) == _EMBED_CHUNK:
-                    count, elapsed = flush()
-                    indexed += count
-                    embed_seconds += elapsed
+                candidates += 1
+
+                keep = True
+                if scene_aware:
+                    key = _scene_key(frame)
+                    since_keep += 1
+                    if last_key is not None:
+                        diff = float(
+                            np.mean(np.abs(key.astype(np.int16) - last_key.astype(np.int16)))
+                        )
+                        keep = diff >= scene_threshold or since_keep >= max_gap_frames
+                    if keep:
+                        last_key = key
+                        since_keep = 0
+
+                if keep:
+                    frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    timestamps.append(frame_index / fps)
+                    kept += 1
+                    if len(frames) == _EMBED_CHUNK:
+                        count, elapsed = flush()
+                        indexed += count
+                        embed_seconds += elapsed
             frame_index += 1
 
         if frames:
@@ -187,21 +239,35 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
                 owns_local_file = storage.backend == "r2"
 
             # Publish the denominator before any embedding work so the frontend
-            # poll shows progress from the first tick.
+            # poll shows progress from the first tick. With scene-aware sampling
+            # this is the fixed-rate ceiling; the consumer re-projects it per
+            # chunk from the keep/candidate ratio.
             duration, step, expected = await asyncio.to_thread(probe_file, local_path)
             video.duration_seconds = duration
             video.frames_total = expected
             await db.commit()
 
+            max_gap_frames = max(
+                1, math.ceil(settings.scene_max_gap_seconds / settings.frame_interval_seconds)
+            )
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
 
-            def emit(timestamps: list, embeddings: list) -> None:
-                loop.call_soon_threadsafe(queue.put_nowait, (_CHUNK, timestamps, embeddings))
+            def emit(timestamps: list, embeddings: list, kept: int, candidates: int) -> None:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait, (_CHUNK, timestamps, embeddings, kept, candidates)
+                )
 
             def worker() -> None:
                 try:
-                    stats = _process_video(local_path, step, emit)
+                    stats = _process_video(
+                        local_path,
+                        step,
+                        emit,
+                        scene_aware=settings.scene_aware_sampling,
+                        scene_threshold=settings.scene_threshold,
+                        max_gap_frames=max_gap_frames,
+                    )
                     loop.call_soon_threadsafe(queue.put_nowait, (_DONE, stats))
                 except Exception as exc:  # pragma: no cover - surfaced via queue
                     loop.call_soon_threadsafe(queue.put_nowait, (_ERROR, exc))
@@ -214,7 +280,13 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
             while True:
                 kind, *payload = await queue.get()
                 if kind == _CHUNK:
-                    timestamps, embeddings = payload
+                    timestamps, embeddings, kept, candidates = payload
+                    if candidates > 0:
+                        # Re-project the denominator toward what will actually be
+                        # embedded so the progress bar tracks real completion
+                        # instead of sitting at ~30% then jumping to 100%.
+                        projected = math.ceil(expected * kept / candidates)
+                        video.frames_total = max(video.frames_indexed, projected)
                     insert_started = time.perf_counter()
                     await _insert_chunk(db, video, timestamps, embeddings)
                     db_seconds += time.perf_counter() - insert_started

@@ -32,6 +32,10 @@ x-backend-env: &backend_env
   R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
   STREAM_WORKER_BASE_URL: ${STREAM_WORKER_BASE_URL:-}
   STREAM_SIGNING_SECRET: ${STREAM_SIGNING_SECRET:-}
+  # Uploads: hard ceiling per file (bytes). Files above 5 GiB use the
+  # presigned multipart flow automatically. Never leave empty ('' breaks
+  # pydantic's int parsing and the migrate service aborts).
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10737418240}
   # LLM query expansion (the "middleman"). Empty LLM_API_KEY = raw-prompt search.
   LLM_API_KEY: ${LLM_API_KEY:-}
   LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
@@ -42,6 +46,13 @@ x-backend-env: &backend_env
   # pydantic's float/int parsing and the migrate service aborts).
   SEARCH_MIN_SIMILARITY: ${SEARCH_MIN_SIMILARITY:-0.24}
   SEARCH_MERGE_WINDOW_SECONDS: ${SEARCH_MERGE_WINDOW_SECONDS:-2.0}
+  # Indexing-pipeline knobs (scene-aware sampling skips near-identical frames,
+  # so long static files index far fewer frames). Defaults mirror config.py —
+  # never leave these empty ('' fails pydantic's parsing).
+  FRAME_INTERVAL_SECONDS: ${FRAME_INTERVAL_SECONDS:-1.0}
+  SCENE_AWARE_SAMPLING: ${SCENE_AWARE_SAMPLING:-true}
+  SCENE_THRESHOLD: ${SCENE_THRESHOLD:-8.0}
+  SCENE_MAX_GAP_SECONDS: ${SCENE_MAX_GAP_SECONDS:-6.0}
   # Inside the compose network the DB host is the service name "db".
   POSTGRES_HOST: db
   POSTGRES_PORT: 5432

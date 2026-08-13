@@ -27,7 +27,9 @@ const STAGES = [
   { label: 'Writing vectors to the index', to: 100 },
 ]
 
-const MAX_BYTES = 512 * 1024 * 1024
+// Matches the backend's MAX_UPLOAD_BYTES default (10 GiB). Files above 5 GiB
+// use the presigned multipart flow so the API never buffers the bytes.
+const MAX_BYTES = 10 * 1024 * 1024 * 1024
 
 type Props = {
   open: boolean

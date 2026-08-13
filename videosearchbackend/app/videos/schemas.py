@@ -63,6 +63,43 @@ class PresignUploadOut(BaseModel):
     expires_in: int = Field(description="Seconds the upload URL stays valid.")
 
 
+class MultipartPartOut(BaseModel):
+    """One presigned PUT URL for a single chunk of a multipart upload."""
+
+    part_number: int
+    url: str
+
+
+class PresignMultipartOut(BaseModel):
+    """A reserved video plus per-chunk URLs for a multipart upload.
+
+    Used for files larger than the 5 GiB single-PUT cap: the browser slices
+    the file into `part_size`-byte chunks, PUTs each to its own URL (reusing
+    the same authentication the API mints), then calls
+    `POST /videos/{id}/complete/multipart` with the returned ETags.
+    """
+
+    video: VideoOut
+    upload_id: str
+    part_size: int = Field(description="Chunk size in bytes; the last chunk may be smaller.")
+    parts: list[MultipartPartOut]
+    expires_in: int = Field(description="Seconds the part URLs stay valid.")
+
+
+class MultipartPartIn(BaseModel):
+    """An uploaded chunk, as returned in the PUT response's ETag header."""
+
+    part_number: int = Field(ge=1)
+    etag: str = Field(min_length=1)
+
+
+class CompleteMultipartIn(BaseModel):
+    """Chunks to assemble into the final object."""
+
+    upload_id: str = Field(min_length=1)
+    parts: list[MultipartPartIn] = Field(min_length=1)
+
+
 class CompleteUploadOut(BaseModel):
     """Result of confirming a presigned upload."""
 

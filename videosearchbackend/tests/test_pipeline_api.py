@@ -164,6 +164,8 @@ def test_failed_index_cleans_up_partial_frames(
 ) -> None:
     """A failure after some chunks committed must not leak frame rows."""
     # 40 frames at 1fps → the first _EMBED_CHUNK (32) commits, the second fails.
+    # Fixed-rate sampling (scene-aware off) so every frame is a candidate.
+    monkeypatch.setattr(get_settings(), "scene_aware_sampling", False)
     path = tmp_path_factory.mktemp("clips") / "long.avi"
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64))
     for _ in range(40):
@@ -307,9 +309,14 @@ def test_search_uses_best_score_across_expanded_variants(
 
 
 def test_search_merges_adjacent_matches_into_one_scene(
-    client: TestClient, fake_embedder: None, tmp_path_factory: pytest.TempPathFactory
+    client: TestClient,
+    fake_embedder: None,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Three consecutive red seconds are one scene spanning 0 → end, not three."""
+    # Fixed-rate sampling so all three frames exist to merge.
+    monkeypatch.setattr(get_settings(), "scene_aware_sampling", False)
     path = tmp_path_factory.mktemp("clips") / "all-red.avi"
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64))
     for _ in range(3):
@@ -378,3 +385,44 @@ def test_search_requires_auth(client: TestClient, clip_bytes: bytes) -> None:
         json={"video_id": str(uuid.uuid4()), "prompt": "anything", "limit": 3},
     )
     assert response.status_code == 401
+
+
+def test_scene_aware_sampling_skips_redundant_frames(
+    client: TestClient, fake_embedder: None, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """40s video: 20s solid red then 20s solid blue.
+
+    Scene-aware sampling (default on) keeps the first frame of each static run
+    plus one frame every SCENE_MAX_GAP_SECONDS (6s) — 8 frames instead of 40,
+    and both runs remain searchable.
+    """
+    path = tmp_path_factory.mktemp("clips") / "two-runs.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64))
+    for _ in range(20):
+        writer.write(np.full((64, 64, 3), (0, 0, 255), dtype=np.uint8))
+    for _ in range(20):
+        writer.write(np.full((64, 64, 3), (255, 0, 0), dtype=np.uint8))
+    writer.release()
+
+    headers = _signup(client)
+    files = {"file": ("two-runs.avi", io.BytesIO(path.read_bytes()), "video/x-msvideo")}
+    video_id = client.post("/api/v1/videos", headers=headers, files=files).json()["id"]
+    _index(client, video_id)
+
+    body = client.get(f"/api/v1/videos/{video_id}", headers=headers).json()
+    assert body["status"] == "ready"
+    # Kept: red at 0,6,12,18 then blue at 20,26,32,38.
+    assert body["frames_indexed"] == 8
+    assert body["frames_total"] == 8
+
+    async def timestamps() -> list[float]:
+        async with engine.connect() as connection:
+            rows = await connection.execute(
+                text(
+                    "SELECT timestamp_sec FROM frames WHERE video_id = :vid ORDER BY timestamp_sec"
+                ),
+                {"vid": uuid.UUID(video_id)},
+            )
+            return [row[0] for row in rows]
+
+    assert client.portal.call(timestamps) == [0.0, 6.0, 12.0, 18.0, 20.0, 26.0, 32.0, 38.0]

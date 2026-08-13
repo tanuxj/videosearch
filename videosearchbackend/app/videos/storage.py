@@ -119,6 +119,78 @@ class Storage:
         path = self._local_path(key)
         return path.stat().st_size if path.exists() else None
 
+    def create_multipart_upload(self, key: str, content_type: str | None) -> str | None:
+        """Open an S3/R2 multipart upload for `key`, returning its upload id.
+
+        Returns None when multipart uploads are unavailable (local backend).
+        The browser then uploads chunks to per-part presigned URLs and the
+        parts are assembled with `complete_multipart`.
+        """
+        if self._client is None:
+            return None
+        assert self._bucket is not None
+        response = self._client.create_multipart_upload(
+            Bucket=self._bucket,
+            Key=key,
+            ContentType=content_type or "application/octet-stream",
+        )
+        return response.get("UploadId")
+
+    def presign_part(
+        self,
+        key: str,
+        upload_id: str,
+        part_number: int,
+        expires_in: int,
+    ) -> str | None:
+        """A presigned PUT URL for one chunk of a multipart upload."""
+        if self._client is None:
+            return None
+        assert self._bucket is not None
+        return self._client.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": self._bucket,
+                "Key": key,
+                "UploadId": upload_id,
+                "PartNumber": part_number,
+            },
+            ExpiresIn=expires_in,
+        )
+
+    def complete_multipart(
+        self,
+        key: str,
+        upload_id: str,
+        parts: list[tuple[int, str]],
+    ) -> None:
+        """Assemble the uploaded chunks. `parts` is `(part_number, etag)` pairs."""
+        if self._client is None:
+            return
+        assert self._bucket is not None
+        self._client.complete_multipart_upload(
+            Bucket=self._bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={
+                "Parts": [{"PartNumber": number, "ETag": etag} for number, etag in parts]
+            },
+        )
+
+    def abort_multipart(self, key: str, upload_id: str) -> None:
+        """Discard an in-progress multipart upload. Silent when it is gone."""
+        if self._client is None:
+            return
+        assert self._bucket is not None
+        try:
+            self._client.abort_multipart_upload(
+                Bucket=self._bucket,
+                Key=key,
+                UploadId=upload_id,
+            )
+        except ClientError:  # pragma: no cover - best-effort cleanup
+            logger.warning("Could not abort multipart upload %s/%s", self._bucket, key)
+
     def _local_path(self, key: str) -> Path:
         """Resolve an object key under the upload root, refusing escapes."""
         root = self._root.resolve()

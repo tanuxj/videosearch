@@ -81,7 +81,14 @@ class Settings(BaseSettings):
 
     # How long a presigned direct-upload URL stays valid (seconds). Large
     # files can take a while to push from the browser to the bucket.
-    presign_url_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+    presign_url_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
+
+    # Hard ceiling on a single video upload (bytes). The browser streams
+    # straight to storage on the presigned path, so this mainly protects the
+    # multipart fallback (which buffers through the API). Files above 5 GiB go
+    # through R2's presigned multipart upload automatically — see
+    # `POST /videos/presign/multipart`.
+    max_upload_bytes: int = Field(default=10 * 1024**3, ge=1)
 
     # Local fallback storage for when R2 is not configured.
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
@@ -111,6 +118,17 @@ class Settings(BaseSettings):
     index_on_upload: bool = True
     # Frames are sampled at this interval (seconds). 1.0 = one frame per second.
     frame_interval_seconds: float = 1.0
+    # Scene-aware sampling: a sampled frame is embedded only when its picture
+    # actually changed versus the last kept frame, so long static-heavy files
+    # (movies, talks) index a fraction of the frames with no real search loss.
+    # A frame is kept when its mean absolute pixel difference (0–255, measured
+    # on a small grayscale proxy) reaches `scene_threshold`, or when
+    # `scene_max_gap_seconds` have passed since the last keep (so slow pans and
+    # zooms still contribute frames). Set `scene_aware_sampling` to false for
+    # the old fixed-rate behaviour.
+    scene_aware_sampling: bool = True
+    scene_threshold: float = Field(default=8.0, ge=0.0, le=255.0)
+    scene_max_gap_seconds: float = Field(default=6.0, ge=0.5, le=3600.0)
     # Rows per batch when writing embeddings to Postgres.
     index_batch_size: int = 128
 

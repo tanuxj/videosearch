@@ -137,18 +137,36 @@ type CompleteUpload = {
   message: string
 }
 
+type MultipartPart = {
+  part_number: number
+  url: string
+}
+
+type PresignMultipart = {
+  video: ApiVideo
+  upload_id: string
+  part_size: number
+  parts: MultipartPart[]
+  expires_in: number
+}
+
+// S3/R2 hard cap for a single PUT — files larger than this go through the
+// chunked multipart flow (presigned per-part URLs) instead.
+const SINGLE_PUT_LIMIT = 5 * 1024 * 1024 * 1024
+
 /**
- * PUT a file to a presigned URL with real upload progress.
+ * PUT a file (or chunk) to a presigned URL with real upload progress.
  *
  * `fetch` cannot report upload progress, so this uses XHR for the body
  * transfer only — the progress callback drives the dialog's progress bar
- * while the browser streams the bytes straight to R2.
+ * while the browser streams the bytes straight to R2. Resolves with the
+ * object's ETag, which multipart completion needs.
  */
 function putFile(
   url: string,
-  file: File,
+  file: Blob,
   onProgress?: (loaded: number, total: number) => void,
-): Promise<void> {
+): Promise<string | null> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('PUT', url)
@@ -157,12 +175,94 @@ function putFile(
       if (event.lengthComputable) onProgress?.(event.loaded, event.total)
     }
     xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve()
-      else reject(new ApiError(xhr.status, `Upload to storage failed (${xhr.status})`))
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.getResponseHeader('ETag'))
+      } else {
+        reject(new ApiError(xhr.status, `Upload to storage failed (${xhr.status})`))
+      }
     }
     xhr.onerror = () => reject(new ApiError(0, 'Upload to storage failed — check your connection'))
     xhr.send(file)
   })
+}
+
+/**
+ * Chunked upload of a file larger than the 5 GiB single-PUT cap.
+ *
+ * The API opens an S3/R2 multipart upload and returns one presigned PUT URL
+ * per chunk; the browser slices the file, PUTs each chunk straight to
+ * storage (tracking overall progress), then the API assembles them. Bytes
+ * never buffer in the API.
+ */
+async function createMultipartApi(
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<VideoRecord> {
+  const data = await apiFetch<PresignMultipart>('/api/v1/videos/presign/multipart', {
+    method: 'POST',
+    body: JSON.stringify({
+      filename: file.name,
+      size_bytes: file.size,
+      content_type: file.type || 'application/octet-stream',
+    }),
+  })
+
+  let uploaded = 0
+  const parts: { part_number: number; etag: string }[] = []
+  try {
+    for (const part of data.parts) {
+      const chunk = file.slice(
+        (part.part_number - 1) * data.part_size,
+        Math.min(part.part_number * data.part_size, file.size),
+      )
+      const etag = await putFile(part.url, chunk, (loaded, total) => {
+        if (total > 0) onProgress?.(uploaded + loaded, file.size)
+      })
+      if (!etag) {
+        throw new ApiError(0, 'Storage did not confirm a chunk — try again.')
+      }
+      parts.push({ part_number: part.part_number, etag })
+      uploaded += chunk.size
+    }
+
+    const completed = await apiFetch<CompleteUpload>(
+      `/api/v1/videos/${data.video.id}/complete/multipart`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ upload_id: data.upload_id, parts }),
+      },
+    )
+    return toRecord(completed.video)
+  } catch (error) {
+    // The transfer or the confirmation failed — don't leave a zombie
+    // `processing` row (and its orphaned object) behind.
+    void apiFetch(`/api/v1/videos/${data.video.id}`, { method: 'DELETE' }).catch(() => {})
+    throw error
+  }
+}
+
+/** Upload through the API (local dev storage / presigning unavailable). */
+async function uploadViaApi(
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<VideoRecord> {
+  const form = new FormData()
+  form.append('file', file)
+
+  const response = await fetch(url('/api/v1/videos'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
+    },
+    body: form,
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, await readError(response, 'Upload failed'))
+  }
+  const video = (await response.json()) as ApiVideo
+  onProgress?.(file.size, file.size)
+  return toRecord(video)
 }
 
 /**
@@ -179,6 +279,20 @@ export async function createVideoApi(
   file: File,
   onProgress?: (loaded: number, total: number) => void,
 ): Promise<VideoRecord> {
+  // Files above the 5 GiB single-PUT cap go through the chunked multipart
+  // flow. A 409 there means storage can't presign at all (local dev) — the
+  // file then buffers through the API instead.
+  if (file.size > SINGLE_PUT_LIMIT) {
+    try {
+      return await createMultipartApi(file, onProgress)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        return uploadViaApi(file, onProgress)
+      }
+      throw error
+    }
+  }
+
   // Fast path: presigned direct upload. 409 here means storage can't presign
   // (e.g. local dev) — fall through to multipart. Other errors are real
   // failures (unsupported type, too large) and must surface to the user.
@@ -218,23 +332,7 @@ export async function createVideoApi(
   }
 
   // Fallback: multipart through the API (local dev storage / older backend).
-  const form = new FormData()
-  form.append('file', file)
-
-  const response = await fetch(url('/api/v1/videos'), {
-    method: 'POST',
-    credentials: 'include',
-    headers: {
-      ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
-    },
-    body: form,
-  })
-  if (!response.ok) {
-    throw new ApiError(response.status, await readError(response, 'Upload failed'))
-  }
-  const video = (await response.json()) as ApiVideo
-  onProgress?.(file.size, file.size)
-  return toRecord(video)
+  return uploadViaApi(file, onProgress)
 }
 
 async function readError(response: Response, fallback: string): Promise<string> {

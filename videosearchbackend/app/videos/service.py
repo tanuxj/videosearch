@@ -13,13 +13,16 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.videos.models import Video
 from app.videos.storage import storage
 
 logger = logging.getLogger(__name__)
 
-# Matches the frontend's client-side cap (512 MiB).
-MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+# Matches the frontend's client-side cap. Read from settings so it is
+# configurable at deploy time (MAX_UPLOAD_BYTES); kept as a module-level name
+# so tests can monkeypatch it directly.
+MAX_UPLOAD_BYTES = get_settings().max_upload_bytes
 
 # Extensions the pipeline knows how to index. The upload handler rejects
 # anything else before a single byte hits storage.

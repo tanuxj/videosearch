@@ -33,7 +33,8 @@ requiring a rewrite.
 
 | Limit | Value | Where |
 |---|---|---|
-| Upload size | 512 MiB (413) | `videos/service.py` `MAX_UPLOAD_BYTES` |
+| Upload size | 10 GiB default (413, configurable) | `MAX_UPLOAD_BYTES` in `videos/service.py` |
+| Large-file path | >5 GiB → presigned multipart to R2 | `POST /videos/presign/multipart` |
 | File types | .mp4 .mov .webm .mkv .avi .m4v (415) | `ALLOWED_EXTENSIONS` |
 | Search results | 1–50 (`limit`) | `videos/search.py` |
 | Prompt length | ≤ 300 chars | `videos/search.py` |
@@ -50,7 +51,7 @@ requiring a rewrite.
 |---|---|---|
 | **Indexing jobs** | `BackgroundTasks` run inside the API process. Restart → job dies. Multiple workers → multiple 600 MB model copies. No retries/queue. | Extract to a job queue + separate worker |
 | **CPU inference** | CLIP on CPU ≈ real-time. 10 concurrent uploads slow the whole API. | GPU worker (serverless) |
-| **Uploads through the API** | FastAPI buffers the whole multipart body in RAM (see `service.py` note). 512 MiB × N = OOM. | Presigned URLs → browser uploads straight to R2 |
+| **Uploads through the API** | FastAPI buffers the whole multipart body in RAM (see `service.py` note). Large files × N = OOM. | Presigned URLs → browser uploads straight to R2 (multipart chunks past 5 GiB) |
 | **Playback through the API** | Every byte-range request proxies through the API → egress + CPU. | Presigned GET + CDN on the bucket |
 | **Single Postgres** | Contention between writes (indexing) and reads (search/stream auth). | Managed Postgres, later read replicas |
 
@@ -200,7 +201,7 @@ videosearchbackend/
 │   ├── auth/              # signup/login/refresh/logout; JWT + rotating cookies
 │   └── videos/
 │       ├── routes.py      # upload/list/status/stream/delete (BackgroundTasks here)
-│       ├── service.py     # business logic; 512 MiB cap, extension allowlist
+│       ├── service.py     # business logic; upload cap, extension allowlist
 │       ├── storage.py     # R2/local facade; presigned/stream hooks go here
 │       ├── pipeline.py    # 1 fps extract → CLIP embed → pgvector insert
 │       ├── embedder.py    # lazy CLIP singleton (image + text)

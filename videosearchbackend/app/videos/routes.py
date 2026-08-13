@@ -32,7 +32,10 @@ from app.core.config import get_settings
 from app.videos import clips, pipeline
 from app.videos import service as videos_service
 from app.videos.schemas import (
+    CompleteMultipartIn,
     CompleteUploadOut,
+    MultipartPartOut,
+    PresignMultipartOut,
     PresignUploadIn,
     PresignUploadOut,
     StreamUrlOut,
@@ -44,6 +47,38 @@ from app.videos.streaming import build_stream_url
 
 # Longest extractable clip (seconds). Keeps ffmpeg runs (and downloads) sane.
 MAX_CLIP_SECONDS = 600.0
+
+# S3/R2 floor for a non-last multipart chunk — smaller parts are rejected on
+# completion. The browser uploads chunks this size (or larger) to the
+# presigned per-part URLs.
+MIN_MULTIPART_PART_BYTES = 5 * 1024 * 1024
+# R2 supports up to 10_000 parts; we stay well under so the same flow works
+# against plain S3 too.
+MAX_MULTIPART_PARTS = 1000
+
+
+def _human_bytes(n: int) -> str:
+    """Compact size for error messages: 10 GiB, 512 MiB, …"""
+    value = n / (1024**3)
+    if value >= 1:
+        return f"{value:g} GiB"
+    return f"{n / (1024**2):g} MiB"
+
+
+def _too_large_detail() -> str:
+    return f"File exceeds the {_human_bytes(videos_service.MAX_UPLOAD_BYTES)} upload limit"
+
+
+def _plan_parts(size_bytes: int) -> tuple[int, int]:
+    """Pick `(part_size, part_count)` so chunks are S3-valid and few in number.
+
+    Each non-final chunk is at least 5 MiB (S3's floor) and there are at most
+    `MAX_MULTIPART_PARTS` chunks total. A 10 GiB file ends up with ~1000 parts
+    of ~10.7 MiB; a 1 GiB file with 205 parts of 5 MiB.
+    """
+    part_size = max(MIN_MULTIPART_PART_BYTES, math.ceil(size_bytes / MAX_MULTIPART_PARTS))
+    part_count = max(1, math.ceil(size_bytes / part_size))
+    return part_size, part_count
 
 
 def _cleanup_clip_files(source: Path, temp_dir: Path) -> None:
@@ -114,7 +149,7 @@ async def upload_video(
     except videos_service.FileTooLarge as exc:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File exceeds the 512 MiB upload limit",
+            detail=_too_large_detail(),
         ) from exc
 
     # Fire-and-forget: the response goes out immediately with status
@@ -163,7 +198,7 @@ async def presign_upload(
     except videos_service.FileTooLarge as exc:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File exceeds the 512 MiB upload limit",
+            detail=_too_large_detail(),
         ) from exc
 
     if not storage.presign_enabled:
@@ -190,6 +225,98 @@ async def presign_upload(
         upload_url=upload_url,
         expires_in=settings.presign_url_ttl_seconds,
     )
+
+
+@router.post(
+    "/presign/multipart",
+    response_model=PresignMultipartOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Reserve a video for a multipart upload",
+    description=(
+        "For files above the 5 GiB single-PUT cap. Creates a `processing` "
+        "video row, opens an S3/R2 multipart upload and returns a presigned "
+        "PUT URL per chunk. The browser uploads each chunk straight to "
+        "storage, then calls `POST /videos/{id}/complete/multipart` with the "
+        "chunks' ETags. When object storage is local disk, returns 409 and "
+        "clients fall back to the multipart upload endpoint."
+    ),
+    responses={
+        415: {"description": "Unsupported file type"},
+        413: {"description": "File too large"},
+        409: {"description": "Direct uploads unavailable"},
+    },
+)
+async def presign_multipart_upload(
+    user: CurrentUser,
+    db: DbSession,
+    payload: PresignUploadIn,
+) -> PresignMultipartOut:
+    try:
+        videos_service.validate_upload(payload.filename, payload.size_bytes)
+    except videos_service.UnsupportedFileType as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported file type: {exc.args[0] or 'unknown'}. "
+            "Allowed: mp4, mov, webm, mkv, avi, m4v",
+        ) from exc
+    except videos_service.FileTooLarge as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=_too_large_detail(),
+        ) from exc
+
+    if not storage.presign_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Direct uploads are unavailable — use the multipart upload endpoint.",
+        )
+
+    video = await videos_service.create_pending_video(
+        db,
+        owner_id=user.id,
+        filename=payload.filename,
+        size_bytes=payload.size_bytes,
+    )
+
+    # Open the multipart upload and mint one URL per chunk. Any failure here
+    # must not leave a reserved row (or a dangling multipart upload) behind.
+    upload_id: str | None = None
+    try:
+        upload_id = await run_in_threadpool(
+            storage.create_multipart_upload,
+            video.storage_key,
+            payload.content_type,
+        )
+        if upload_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Multipart uploads are unavailable on this storage backend.",
+            )
+
+        part_size, part_count = _plan_parts(payload.size_bytes)
+        parts: list[MultipartPartOut] = []
+        for number in range(1, part_count + 1):
+            part_url = await run_in_threadpool(
+                storage.presign_part,
+                video.storage_key,
+                upload_id,
+                number,
+                settings.presign_url_ttl_seconds,
+            )
+            parts.append(MultipartPartOut(part_number=number, url=part_url))
+
+        return PresignMultipartOut(
+            video=VideoOut.model_validate(video),
+            upload_id=upload_id,
+            part_size=part_size,
+            parts=parts,
+            expires_in=settings.presign_url_ttl_seconds,
+        )
+    except Exception:
+        if upload_id is not None:
+            await run_in_threadpool(storage.abort_multipart, video.storage_key, upload_id)
+        await videos_service.delete_video(db, user.id, video.id)
+        raise
 
 
 @router.post(
@@ -241,6 +368,73 @@ async def complete_upload(
     # still `processing`: a replayed complete (double-click, retry) must not
     # enqueue two pipelines for the same video — the second would hit the
     # per-video-per-second unique constraint and mark the video failed.
+    if settings.index_on_upload and video.status == "processing":
+        background_tasks.add_task(pipeline.index_video, video.id)
+    if video.status == "processing":
+        message = "Upload confirmed — indexing started"
+    else:
+        message = "Upload confirmed"
+    return CompleteUploadOut(video=VideoOut.model_validate(video), message=message)
+
+
+@router.post(
+    "/{video_id}/complete/multipart",
+    response_model=CompleteUploadOut,
+    summary="Assemble a multipart upload and start indexing",
+    description=(
+        "Called after the browser PUTs every chunk to the per-part presigned "
+        "URLs from `POST /videos/presign/multipart`. Assembles the object and "
+        "verifies its size before starting the indexing pipeline."
+    ),
+    responses={404: {"description": "Video not found"}},
+)
+async def complete_multipart_video(
+    user: CurrentUser,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
+    video_id: uuid.UUID,
+    payload: CompleteMultipartIn,
+) -> CompleteUploadOut:
+    try:
+        video = await videos_service.get_video(db, user.id, video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+
+    try:
+        await run_in_threadpool(
+            storage.complete_multipart,
+            video.storage_key,
+            payload.upload_id,
+            [(part.part_number, part.etag) for part in payload.parts],
+        )
+    except Exception as exc:
+        # InvalidPart / NoSuchUpload / missing chunks — the object isn't whole,
+        # so surface it as a client error rather than a 500.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Could not assemble the uploaded parts: {exc}",
+        ) from exc
+
+    # Confirm the assembled object matches the declared size before indexing.
+    try:
+        await videos_service.complete_pending_video(
+            db,
+            owner_id=user.id,
+            video_id=video_id,
+            expected_bytes=video.size_bytes,
+        )
+    except videos_service.UploadNotComplete as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="File has not been uploaded yet — PUT the parts first.",
+        ) from exc
+    except videos_service.UploadSizeMismatch as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Uploaded size ({exc.actual} bytes) does not match the declared "
+            f"size ({exc.expected} bytes). Upload the file again.",
+        ) from exc
+
     if settings.index_on_upload and video.status == "processing":
         background_tasks.add_task(pipeline.index_video, video.id)
     if video.status == "processing":
