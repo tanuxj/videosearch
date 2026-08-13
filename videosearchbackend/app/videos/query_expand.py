@@ -86,7 +86,10 @@ def expand_prompt(raw: str) -> list[str]:
         ],
         "response_format": {"type": "json_object"},
     }
-    url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
+    # Accept either a bare endpoint (…/openai) or the full path
+    # (…/openai/chat/completions) — don't double-append.
+    base = settings.llm_base_url.rstrip("/")
+    url = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),

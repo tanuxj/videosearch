@@ -32,6 +32,16 @@ x-backend-env: &backend_env
   R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
   STREAM_WORKER_BASE_URL: ${STREAM_WORKER_BASE_URL:-}
   STREAM_SIGNING_SECRET: ${STREAM_SIGNING_SECRET:-}
+  # LLM query expansion (the "middleman"). Empty LLM_API_KEY = raw-prompt search.
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+  LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+  LLM_EXPAND_PROMPTS: ${LLM_EXPAND_PROMPTS:-2}
+  # Semantic-search tuning (passed through so you can tweak without a rebuild).
+  # Defaults mirror app/core/config.py — never leave these empty ('' fails
+  # pydantic's float/int parsing and the migrate service aborts).
+  SEARCH_MIN_SIMILARITY: ${SEARCH_MIN_SIMILARITY:-0.24}
+  SEARCH_MERGE_WINDOW_SECONDS: ${SEARCH_MERGE_WINDOW_SECONDS:-2.0}
   # Inside the compose network the DB host is the service name "db".
   POSTGRES_HOST: db
   POSTGRES_PORT: 5432
