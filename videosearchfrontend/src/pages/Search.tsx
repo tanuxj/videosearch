@@ -36,9 +36,12 @@ export default function Search() {
   const [thumbs, setThumbs] = useState<Map<number, string>>(new Map())
   const [openClip, setOpenClip] = useState<Clip | null>(null)
   const [searching, setSearching] = useState(false)
-  const [meta, setMeta] = useState<{ source: string; tookMs: number } | null>(
-    null,
-  )
+  const [meta, setMeta] = useState<{
+    source: string
+    tookMs: number
+    expanded?: boolean
+  } | null>(null)
+  const [searchError, setSearchError] = useState<string | null>(null)
   const [lastQuery, setLastQuery] = useState('')
   const [uploadOpen, setUploadOpen] = useState(query.get('upload') === '1')
   /** Object URL for the selected video — only set if the file was attached in
@@ -73,6 +76,7 @@ export default function Search() {
     setThumbs(new Map())
     setOpenClip(null)
     setMeta(null)
+    setSearchError(null)
   }, [selectedId])
 
   // Playback source: a local file attached this session, or the server's
@@ -114,10 +118,16 @@ export default function Search() {
     setOpenClip(null)
     setThumbs(new Map())
     setLastQuery(trimmed)
+    setSearchError(null)
 
     const result = await searchClips(target, trimmed)
     setClips(result.clips)
-    setMeta({ source: result.source, tookMs: result.tookMs })
+    setMeta({
+      source: result.source,
+      tookMs: result.tookMs,
+      expanded: result.expanded,
+    })
+    setSearchError(result.error ?? null)
     setSearching(false)
   }
 
@@ -300,8 +310,9 @@ export default function Search() {
         <div className="mt-8">
           <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
             <h2 className="text-[15.5px] font-semibold tracking-[-0.015em] text-ink">
-              {clips.length} {clips.length === 1 ? 'match' : 'matches'} for “
-              {lastQuery}”
+              {searchError
+                ? 'Search couldn’t run'
+                : `${clips.length} ${clips.length === 1 ? 'match' : 'matches'} for “${lastQuery}”`}
             </h2>
             {meta && (
               <span className="text-[12.5px] text-ink-faint">
@@ -309,6 +320,7 @@ export default function Search() {
                 {meta.source === 'api'
                   ? 'ranked by backend'
                   : 'demo ranking (no backend configured)'}
+                {meta.expanded && ' · query expanded'}
               </span>
             )}
           </div>
@@ -317,15 +329,24 @@ export default function Search() {
             <Panel>
               <EmptyState
                 icon={<SearchIcon />}
-                title="No frames matched"
-                body="Try describing what’s visible in the shot — objects, setting, colours — rather than what’s said."
+                title={searchError ? 'Search couldn’t run' : 'No scene matched'}
+                body={
+                  searchError ??
+                  'Nothing in this video matches your description. Try rewording it, or describe what’s visible — objects, setting, colours — rather than what’s said.'
+                }
               />
             </Panel>
           ) : (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
               {clips.map((clip, index) => {
                 const thumb = thumbs.get(clip.frame)
-                const percent = Math.round(clip.score * 100)
+                // Rank-relative confidence: the best scene in this result set
+                // always reads 100%, weaker scenes scale down from it. CLIP's
+                // raw cosine similarities are compressed (~0.25–0.45 for real
+                // matches), so an absolute scale would make every real match
+                // look like a near-miss.
+                const topScore = Math.max(...clips.map((c) => c.score))
+                const percent = Math.round((clip.score / Math.max(topScore, 0.001)) * 100)
                 return (
                   <Reveal key={clip.id} y={10} delay={index * 0.028}>
                     <SpotlightCard className="h-full">

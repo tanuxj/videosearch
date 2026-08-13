@@ -114,6 +114,33 @@ class Settings(BaseSettings):
     # Rows per batch when writing embeddings to Postgres.
     index_batch_size: int = 128
 
+    # ── Semantic search ────────────────────────────────────────
+    # Minimum cosine similarity (0–1) between the prompt embedding and a frame
+    # for it to count as a match. CLIP's text↔image similarity for unrelated
+    # content clusters around 0.2, so 0.24 is a safe floor for real matches;
+    # below it a search returns zero scenes instead of the video's least-bad
+    # frames. Raise it for stricter results, lower it if real matches are
+    # being missed on your footage.
+    search_min_similarity: float = Field(default=0.24, ge=0.0, le=1.0)
+    # Consecutive matching frames closer than this (seconds) are merged into a
+    # single scene, so a multi-second moment reads as one clip with a real
+    # start and end rather than several overlapping single-frame windows.
+    search_merge_window_seconds: float = Field(default=2.0, ge=0.0)
+
+    # ── LLM query expansion (the "middleman") ──────────────────
+    # CLIP matches best when text names what's visible — objects, setting,
+    # colours, action. Terse or broken-English prompts embed poorly. When
+    # `llm_api_key` is set, each search prompt is rewritten + expanded by an
+    # OpenAI-compatible chat model into a few visually-grounded variants, and
+    # every variant is embedded (per-frame similarity = the best of them), so
+    # vague phrasing still lands. Without a key, the raw prompt is used as-is.
+    llm_api_key: str | None = None
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_model: str = "gpt-4o-mini"
+    # How many extra expanded variants to generate (on top of the raw prompt).
+    llm_expand_prompts: int = Field(default=2, ge=0, le=5)
+    llm_timeout_seconds: float = Field(default=15.0, ge=1.0, le=120.0)
+
     # ── Postgres database (spawned by docker-compose) ────────────
     # The compose stack passes these to the container; when running the
     # app locally they default to the same dev values.

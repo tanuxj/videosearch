@@ -353,9 +353,7 @@ def test_stream_url_returns_signed_worker_url_when_configured(
     from app.videos import streaming
 
     # routes and streaming both read the same cached settings singleton.
-    monkeypatch.setattr(
-        streaming.settings, "stream_worker_base_url", "https://edge.example.com"
-    )
+    monkeypatch.setattr(streaming.settings, "stream_worker_base_url", "https://edge.example.com")
     monkeypatch.setattr(streaming.settings, "stream_signing_secret", "secret")
     monkeypatch.setattr(streaming.settings, "stream_url_ttl_seconds", 3600)
 
@@ -594,9 +592,7 @@ def test_complete_409_when_file_never_uploaded(
     assert "not been uploaded" in response.json()["detail"]
 
 
-def test_complete_409_on_size_mismatch(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_complete_409_on_size_mismatch(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.videos.storage import storage
 
     # Storage reports a different size than what was declared at presign.

@@ -63,9 +63,7 @@ def _try_run(binary: str, cmd: list[str]) -> bool:
     except OSError as exc:
         raise ClipError(f"ffmpeg could not run ({binary}): {exc}") from exc
     if result.returncode != 0:
-        logger.warning(
-            "ffmpeg exited %d: %s", result.returncode, result.stderr.strip()[-400:]
-        )
+        logger.warning("ffmpeg exited %d: %s", result.returncode, result.stderr.strip()[-400:])
         return False
     return True
 

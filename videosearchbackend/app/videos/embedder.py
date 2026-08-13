@@ -75,9 +75,7 @@ def _ensure_model() -> Any:
         from sentence_transformers import SentenceTransformer
 
         try:
-            _model = SentenceTransformer(
-                settings.clip_model_name, local_files_only=True
-            )
+            _model = SentenceTransformer(settings.clip_model_name, local_files_only=True)
             logger.info("CLIP loaded from local cache (no network)")
         except Exception:
             logger.info("CLIP not in cache; downloading weights")
@@ -221,9 +219,7 @@ def _get_vision_session() -> Any | None:
             try:
                 _export_vision_onnx(onnx_path)
             except Exception:
-                logger.exception(
-                    "CLIP ONNX export failed — falling back to torch embeddings"
-                )
+                logger.exception("CLIP ONNX export failed — falling back to torch embeddings")
                 _vision_backend_failed = True
                 return None
         # Ensure the torch model is resident before running inference: the

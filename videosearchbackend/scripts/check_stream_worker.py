@@ -118,7 +118,9 @@ def check_rejections(base: str) -> None:
     record(PASS if status == 403 else FAIL, "expired signature rejected", f"HTTP {status}")
 
     # A signature is bound to its key, so moving it to another path must fail.
-    other = sign_stream_path("other/key.mp4", settings.stream_signing_secret, int(time.time()) + 300)
+    other = sign_stream_path(
+        "other/key.mp4", settings.stream_signing_secret, int(time.time()) + 300
+    )
     tampered = f"{base}/stream/{probe}?{other.split('?', 1)[1]}"
     status, _, _ = fetch(tampered)
     record(PASS if status == 403 else FAIL, "signature bound to its key", f"HTTP {status}")

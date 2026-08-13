@@ -63,6 +63,8 @@ export function ClipLightbox({
   const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<string | null>(null)
   const index = clip ? clips.findIndex((item) => item.id === clip.id) : -1
+  // Rank-relative confidence — matches the grid's bars (see Search.tsx).
+  const topScore = Math.max(...clips.map((item) => item.score))
 
   // Seek to the match and play whenever the selected clip changes.
   useEffect(() => {
@@ -157,7 +159,7 @@ export function ClipLightbox({
             </div>
 
             <span className="shrink-0 rounded-full border border-brand-line bg-brand-wash px-2.5 py-1 text-[12px] font-semibold text-brand">
-              {Math.round(clip.score * 100)}% match
+              {Math.round((clip.score / Math.max(topScore, 0.001)) * 100)}% match
             </span>
 
             {API_ENABLED && (
