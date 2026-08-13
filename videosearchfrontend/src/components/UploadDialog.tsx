@@ -20,16 +20,41 @@ import { Chip } from './ui/Data'
 import { CheckIcon, PlayIcon, SearchIcon, UploadIcon } from './Icons'
 import { compactNumber, fileSize, humanDuration } from '../lib/format'
 
+/**
+ * Share of the bar given to the transfer, before indexing starts.
+ *
+ * Indexing is usually the longer half, but the upload is the part with an
+ * exact byte count, so it gets a fixed slice and indexing gets the rest.
+ */
+const UPLOAD_SHARE = 30
+
+/**
+ * The three things that actually happen, in order.
+ *
+ * There used to be four — "extracting", "embedding" and "writing vectors" were
+ * listed separately — but the backend does not work that way: it decodes,
+ * embeds and inserts one 32-frame chunk at a time, so those phases interleave
+ * from the first second to the last. Showing them as sequential steps meant the
+ * UI had to guess which one was "current", and it guessed wrong. One honest
+ * indexing step with a real frame count beats three invented ones.
+ */
 const STAGES = [
-  { label: 'Uploading file', to: 34 },
-  { label: 'Extracting frames (1 fps)', to: 62 },
-  { label: 'Embedding frames with CLIP', to: 90 },
-  { label: 'Writing vectors to the index', to: 100 },
+  { label: 'Uploading file' },
+  { label: 'Indexing frames (1 fps)' },
+  { label: 'Ready to search' },
 ]
+
+/** How long indexing may report no new frames before we call it stuck. */
+const STALL_LIMIT_MS = 120_000
 
 // Matches the backend's MAX_UPLOAD_BYTES default (10 GiB). Files above 5 GiB
 // use the presigned multipart flow so the API never buffers the bytes.
 const MAX_BYTES = 10 * 1024 * 1024 * 1024
+
+/** `n` with the unit pluralised — "1 frame", "9.3K frames". */
+function framesLabel(n: number): string {
+  return `${compactNumber(n)} ${n === 1 ? 'frame' : 'frames'}`
+}
 
 type Props = {
   open: boolean
@@ -49,6 +74,8 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
   const [progress, setProgress] = useState(0)
   const [stage, setStage] = useState(0)
   const [done, setDone] = useState(false)
+  /** Seconds remaining, once enough frames have landed to estimate a rate. */
+  const [eta, setEta] = useState<number | null>(null)
 
   useEffect(() => {
     aliveRef.current = true
@@ -76,40 +103,74 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     setStage(0)
     setProgress(0)
 
-    // Stage 0 = the actual multipart upload.
+    // Stage 0 — the transfer, the one phase with an exact byte count.
     const record = await createVideoApi(file, (loaded, total) => {
       if (!aliveRef.current) return
       const fraction = total > 0 ? loaded / total : 1
-      setProgress(Math.round(STAGES[0]!.to * fraction))
+      setProgress(Math.round(UPLOAD_SHARE * fraction))
     })
     if (!aliveRef.current) return
     setStage(1)
-    setProgress(STAGES[0]!.to)
-    setVideo(record)  // server owns the record — nothing to persist locally
+    setProgress(UPLOAD_SHARE)
+    setVideo(record) // server owns the record — nothing to persist locally
 
-    // Poll the video until the backend marks it ready (or failed).
+    // Stage 1 — poll until the backend reports ready (or failed).
+    //
+    // Progress is `frames_indexed / frames_total`, both straight from the
+    // server. The previous version divided by a hardcoded 60, so anything
+    // longer than a minute pinned the bar near the top within seconds and then
+    // sat there — which is exactly what "stale, then jumps to 100" was.
     let current = record
-    for (let attempt = 0; attempt < 300; attempt += 1) {
+    let lastFrames = -1
+    let lastChange = Date.now()
+    const startedAt = Date.now()
+
+    while (aliveRef.current) {
       await new Promise((resolve) => setTimeout(resolve, 1000))
       if (!aliveRef.current) return
       current = (await getVideo(record.id)) ?? current
       setVideo(current)
+
       if (current.status === 'ready') break
       if (current.status === 'failed') {
-        throw new Error('Indexing failed on the server — try another file.')
+        throw new Error(
+          current.error || 'Indexing failed on the server — try another file.',
+        )
       }
-      // Progress between stages 1–3 maps to the real frames indexed.
-      const ratio = current.frames > 0 ? Math.min(1, 0.2 + current.frames / 60) : 0.2
-      setStage(2)
-      setProgress(STAGES[1]!.to + (STAGES[3]!.to - STAGES[1]!.to) * ratio)
-    }
 
-    if (current.status !== 'ready') {
-      throw new Error('Indexing is taking longer than expected — check back soon.')
-    }
+      if (current.frames !== lastFrames) {
+        lastFrames = current.frames
+        lastChange = Date.now()
+      }
 
-    setStage(3)
-    setProgress(STAGES[3]!.to)
+      // `frames_total` is 0 until the server has probed the file. Hold at the
+      // start of the indexing band rather than dividing by zero.
+      if (current.framesTotal > 0) {
+        const ratio = Math.min(1, current.frames / current.framesTotal)
+        setProgress(UPLOAD_SHARE + (100 - UPLOAD_SHARE) * ratio)
+        // A rate needs a few seconds of history to mean anything.
+        const elapsed = (Date.now() - startedAt) / 1000
+        if (current.frames > 0 && elapsed > 4) {
+          const perSecond = current.frames / elapsed
+          const left = (current.framesTotal - current.frames) / perSecond
+          setEta(Number.isFinite(left) && left > 1 ? left : null)
+        }
+      }
+
+      // Bound on *silence*, not on total time: a two-hour film legitimately
+      // takes many minutes, and the old 300-second cap failed those uploads
+      // with "taking longer than expected" while they were working fine.
+      if (Date.now() - lastChange > STALL_LIMIT_MS) {
+        throw new Error(
+          'Indexing has stopped responding. It may still finish — check your library in a few minutes.',
+        )
+      }
+    }
+    if (!aliveRef.current) return
+
+    setStage(2)
+    setProgress(100)
+    setEta(null)
 
     // Grab a real poster frame from the server-side stream.
     try {
@@ -140,12 +201,15 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     const duration = await readVideoDuration(file)
     if (!aliveRef.current) return
 
+    // One sampled frame per second of video, matching the real pipeline.
+    const expectedFrames = Math.max(1, Math.round(duration))
     const record: VideoRecord = {
       id,
       name: file.name,
       sizeBytes: file.size,
       duration,
-      frames: Math.max(1, Math.round(duration)),
+      frames: 0,
+      framesTotal: expectedFrames,
       status: 'processing',
       createdAt: new Date().toISOString(),
     }
@@ -164,20 +228,26 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     setVideo(withPoster)
     saveVideo(user.id, withPoster)
 
-    // Walk the indexing stages. The heavy lifting is server-side; the client
-    // just reports where the pipeline is.
-    for (let index = 0; index < STAGES.length; index += 1) {
+    // No server to poll, so walk the frame counter to the expected total. This
+    // drives the same `frames / framesTotal` readout the real pipeline uses, so
+    // demo mode and server mode render identically.
+    setStage(0)
+    for (let step = 1; step <= 10; step += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 40))
       if (!aliveRef.current) return
-      setStage(index)
-      const target = STAGES[index]!.to
-      const from = index === 0 ? 0 : STAGES[index - 1]!.to
-      const steps = 12
-      for (let step = 1; step <= steps; step += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 45))
-        if (!aliveRef.current) return
-        setProgress(from + ((target - from) * step) / steps)
-      }
+      setProgress((UPLOAD_SHARE * step) / 10)
     }
+
+    setStage(1)
+    const ticks = Math.min(24, expectedFrames)
+    for (let tick = 1; tick <= ticks; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      if (!aliveRef.current) return
+      const indexed = Math.round((expectedFrames * tick) / ticks)
+      setVideo({ ...withPoster, frames: indexed })
+      setProgress(UPLOAD_SHARE + ((100 - UPLOAD_SHARE) * tick) / ticks)
+    }
+    setStage(2)
 
     const ready: VideoRecord = { ...withPoster, status: 'ready' }
     setVideo(ready)
@@ -304,7 +374,11 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                 <span className="block truncate text-[12px] text-ink-faint">
                   {fileSize(video.sizeBytes)}
                   {video.duration > 0 && ` · ${humanDuration(video.duration)}`}
-                  {` · ${compactNumber(Math.max(video.frames, 1))} frames`}
+                  {/* Only claim a frame count once one exists. The old
+                      `Math.max(frames, 1)` printed "1 frames" for every video
+                      before indexing had produced anything. */}
+                  {video.framesTotal > 0 &&
+                    ` · ${framesLabel(video.framesTotal)} to index`}
                 </span>
                 {/* Progress track is a lighter step of the fill's own hue, so
                     the bar reads as one scale rather than fill-on-grey. */}
@@ -318,9 +392,16 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
               {done ? (
                 <Chip tone="ok">Indexed</Chip>
               ) : (
-                <span className="shrink-0 text-[12.5px] font-semibold text-brand">
-                  {Math.round(progress)}%
-                </span>
+                <div className="shrink-0 text-right">
+                  <span className="block text-[12.5px] font-semibold text-brand">
+                    {Math.round(progress)}%
+                  </span>
+                  {eta !== null && (
+                    <span className="block text-[11px] text-ink-faint">
+                      ~{humanDuration(eta)} left
+                    </span>
+                  )}
+                </div>
               )}
             </div>
 
@@ -353,9 +434,14 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                       {complete && <CheckIcon />}
                     </span>
                     {item.label}
-                    {index === 1 && (
+                    {/* Live count on the indexing row: "1.2K / 9.3K frames"
+                        moves every second, which is the whole point — the old
+                        bare "0 frames" never changed until it was already done. */}
+                    {index === 1 && (active || complete) && (
                       <span className="ml-auto font-mono text-[11.5px] text-ink-faint">
-                        {compactNumber(video.frames)} frames
+                        {video.framesTotal > 0
+                          ? `${compactNumber(video.frames)} / ${framesLabel(video.framesTotal)}`
+                          : 'reading video…'}
                       </span>
                     )}
                   </div>

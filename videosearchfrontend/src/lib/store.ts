@@ -23,7 +23,16 @@ export type VideoRecord = {
   name: string
   sizeBytes: number
   duration: number
+  /** Frames embedded so far — the numerator of indexing progress. */
   frames: number
+  /**
+   * Frames the backend expects to embed in total.
+   *
+   * Published before any embedding starts and re-projected as sampling
+   * proceeds, so `frames / framesTotal` is real progress. 0 until the server
+   * has probed the file.
+   */
+  framesTotal: number
   status: VideoStatus
   createdAt: string
   /** Small JPEG data URL captured from the first seconds of the video. */
@@ -94,6 +103,7 @@ function toRecord(video: ApiVideo): VideoRecord {
     sizeBytes: video.size_bytes,
     duration: video.duration_seconds ?? 0,
     frames: video.frames_indexed,
+    framesTotal: video.frames_total,
     status: video.status,
     createdAt: video.created_at,
     error: video.error ?? undefined,
