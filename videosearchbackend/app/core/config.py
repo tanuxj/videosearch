@@ -176,6 +176,15 @@ class Settings(BaseSettings):
     #
     # Transcription is off until `stt_api_key` is set — videos then carry
     # `transcript_status="skipped"` and the app behaves exactly as before.
+    # Where transcripts come from.
+    #
+    # `whisper` calls the ASR endpoint below — sentence-level segments plus a
+    # detected language, available seconds after upload and independent of
+    # anything else. `twelvelabs` reuses the transcript Marengo already built
+    # while indexing, costing nothing extra, at the price of word-level
+    # fragments (merged back into cues on read) and **no language detection**.
+    transcript_source: Literal["whisper", "twelvelabs"] = "whisper"
+
     stt_api_key: str | None = None
     stt_base_url: str = "https://api.groq.com/openai/v1"
     stt_model: str = "whisper-large-v3-turbo"
@@ -317,7 +326,14 @@ class Settings(BaseSettings):
 
     @property
     def transcription_configured(self) -> bool:
-        """True when an ASR endpoint is available to transcribe audio with."""
+        """True when the configured transcript source can actually produce one.
+
+        With `transcript_source="twelvelabs"` this is deliberately False: the
+        Whisper pass must not run, and videos should not sit in `pending`
+        waiting for it. The remote indexer fills the transcript in instead.
+        """
+        if self.transcript_source == "twelvelabs":
+            return False
         return bool(self.stt_api_key and self.stt_base_url and self.stt_model)
 
     @property

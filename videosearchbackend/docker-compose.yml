@@ -68,6 +68,10 @@ x-backend-env: &backend_env
   # through, or the container silently produces no subtitles however the
   # host .env is configured. Never leave the numeric ones empty ('' fails
   # pydantic's parsing and the migrate service aborts).
+  # Which source fills transcript_segments: "whisper" (the STT_* endpoint
+  # below) or "twelvelabs" (reuses the transcript Marengo built while
+  # indexing — free, but word-level and with no detected language).
+  TRANSCRIPT_SOURCE: ${TRANSCRIPT_SOURCE:-whisper}
   STT_API_KEY: ${STT_API_KEY:-}
   STT_BASE_URL: ${STT_BASE_URL:-https://api.groq.com/openai/v1}
   STT_MODEL: ${STT_MODEL:-whisper-large-v3-turbo}

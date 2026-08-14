@@ -323,6 +323,58 @@ async def _mark_remote(video_id: uuid.UUID, status: str, error: str | None) -> N
         logger.exception("Could not record remote index status for video %s", video_id)
 
 
+async def _store_remote_transcript(
+    video_id: uuid.UUID, index_id: str, remote_video_id: str
+) -> None:
+    """Persist Marengo's transcript into `transcript_segments`. Never raises.
+
+    Writes the same rows the Whisper path does, so the transcript panel, the
+    WebVTT track and the API all work unchanged — the source is an
+    implementation detail to everything downstream.
+
+    `language` is deliberately left alone: the API does not report what it
+    heard, and inventing a value would put a wrong `srclang` on the subtitle
+    track. It stays None (or whatever an earlier Whisper run detected).
+    """
+    try:
+        await _mark_transcript(video_id, "processing", None)
+        cues = await asyncio.to_thread(twelvelabs.transcript, index_id, remote_video_id)
+
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            if video is None:
+                return
+            await db.execute(
+                delete(TranscriptSegment).where(TranscriptSegment.video_id == video_id)
+            )
+            if cues:
+                await db.execute(
+                    insert(TranscriptSegment),
+                    [
+                        {
+                            "video_id": video_id,
+                            "idx": index,
+                            "start_sec": cue.start,
+                            "end_sec": cue.end,
+                            "text": cue.text,
+                        }
+                        for index, cue in enumerate(cues)
+                    ],
+                )
+            # No speech is a normal outcome, not a failure — but it is also
+            # not a transcript, so say `skipped` rather than `ready`.
+            video.transcript_status = "ready" if cues else "skipped"
+            video.transcript_error = None
+            await db.commit()
+
+        logger.info(
+            "Stored Twelve Labs transcript for video %s: %d cues", video_id, len(cues)
+        )
+    except Exception as exc:  # noqa: BLE001 - must not fail the indexing job
+        logger.exception("Could not store remote transcript for video %s", video_id)
+        await _mark_transcript(video_id, "failed", str(exc))
+
+
 async def index_remotely(video_id: uuid.UUID) -> None:
     """Index one video with Twelve Labs (Marengo). Never raises.
 
@@ -429,6 +481,12 @@ async def index_remotely(video_id: uuid.UUID) -> None:
                         video.remote_index_status = "ready"
                         video.remote_index_error = None
                         await db.commit()
+
+                # Marengo transcribed the speech while indexing it, so when it
+                # is the configured source the transcript is already paid for
+                # and just needs fetching.
+                if settings.transcript_source == "twelvelabs" and remote_video_id:
+                    await _store_remote_transcript(video_id, index_id, remote_video_id)
                 logger.info(
                     "Remote-indexed video %s in %.1fs (remote id %s)",
                     video_id,
@@ -461,6 +519,26 @@ async def transcribe_existing(video_id: uuid.UUID) -> None:
     that was indexed while no ASR key was configured — otherwise has no route
     to a transcript short of deleting and re-uploading it.
     """
+    # With Marengo as the transcript source there is no audio pass to run:
+    # the transcript is a by-product of remote indexing. Fetch it if that has
+    # already happened, otherwise start it — either way the user's "Generate
+    # transcript" press does the thing they asked for rather than failing
+    # with "not configured", which is true but useless.
+    if settings.transcript_source == "twelvelabs":
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            if video is None:
+                return
+            remote_ready = video.remote_index_status == "ready"
+            remote_video_id = video.remote_video_id
+
+        if remote_ready and remote_video_id:
+            index_id = await asyncio.to_thread(twelvelabs.ensure_index)
+            await _store_remote_transcript(video_id, index_id, remote_video_id)
+        else:
+            await index_remotely(video_id)
+        return
+
     local_path: Path | None = None
     owns_local_file = False
     try:

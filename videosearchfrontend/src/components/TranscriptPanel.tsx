@@ -178,6 +178,8 @@ export function TranscriptPanel({ video, onSeek }: Props) {
       <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[13px] text-ink-faint [&>svg]:size-3.5">
         <FilmIcon />
         <span>No transcript for this video yet.</span>
+        {/* The reason is server-side and not worth guessing at from here —
+            the button either produces one or reports why it cannot. */}
         <button
           type="button"
           disabled={starting}

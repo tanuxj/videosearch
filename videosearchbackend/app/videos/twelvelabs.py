@@ -73,6 +73,87 @@ class SearchHit:
     transcription: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TranscriptCue:
+    """A readable span of speech, merged from word-level fragments."""
+
+    start: float
+    end: float
+    text: str
+
+
+# Cue shaping. Marengo returns one fragment per word, which is unreadable as a
+# subtitle (each cue flashes for a fraction of a second) and unusable as a
+# transcript. These bound the merge back into utterances.
+_CUE_MAX_SECONDS = 6.0
+# A pause this long reads as a sentence boundary even without punctuation —
+# which matters, because several languages here are transcribed without any.
+_CUE_GAP_SECONDS = 0.7
+_CUE_MAX_CHARS = 90
+_SENTENCE_END = (".", "?", "!", "。", "？", "！", "…")
+
+
+def transcript(index_id: str, video_id: str) -> list[TranscriptCue]:
+    """The full spoken transcript for an indexed video, as readable cues.
+
+    Marengo stores speech per *word*; this merges runs of words into cues that
+    work as both subtitles and a scrollable transcript. A cue closes on the
+    first of: sentence-ending punctuation, a pause of ``_CUE_GAP_SECONDS``,
+    ``_CUE_MAX_SECONDS`` of speech, or ``_CUE_MAX_CHARS`` of text.
+
+    Note this carries **no language**: unlike Whisper, the API does not report
+    what it heard, so callers cannot populate a subtitle track's `srclang`
+    from it.
+    """
+    body = _request("GET", f"/indexes/{index_id}/videos/{video_id}?transcription=true")
+    fragments = body.get("transcription")
+    if not isinstance(fragments, list):
+        return []
+
+    cues: list[TranscriptCue] = []
+    words: list[str] = []
+    start = end = 0.0
+
+    def flush() -> None:
+        if words:
+            cues.append(TranscriptCue(start, max(end, start), " ".join(words)))
+
+    for fragment in fragments:
+        if not isinstance(fragment, dict):
+            continue
+        value = str(fragment.get("value") or "").strip()
+        if not value:
+            continue
+        at = float(fragment.get("start") or 0.0)
+        until = float(fragment.get("end") or at)
+
+        if not words:
+            start, end = at, until
+            words = [value]
+            continue
+
+        # Close before appending when this word starts after a real pause, or
+        # when the cue is already as long as it should get.
+        gap = at - end
+        too_long = (until - start) > _CUE_MAX_SECONDS
+        too_wide = len(" ".join(words)) + len(value) + 1 > _CUE_MAX_CHARS
+        if gap >= _CUE_GAP_SECONDS or too_long or too_wide:
+            flush()
+            start, end, words = at, until, [value]
+            continue
+
+        words.append(value)
+        end = until
+        # Sentence punctuation ends a cue, but only once it is worth showing —
+        # an abbreviation mid-phrase should not split it into slivers.
+        if value.endswith(_SENTENCE_END) and (end - start) >= 1.0:
+            flush()
+            words = []
+
+    flush()
+    return cues
+
+
 def rank_score(rank: int) -> float:
     """A descending 0–1 stand-in for the similarity Marengo does not return.
 

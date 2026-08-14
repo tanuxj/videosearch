@@ -810,7 +810,20 @@ async def start_transcription(
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
-    if not settings.transcription_configured:
+    # Two sources can produce a transcript, and `transcription_configured`
+    # only speaks for the Whisper one — gating on it alone reported "not
+    # configured" on a server that was perfectly able to transcribe, just by
+    # another route.
+    if settings.transcript_source == "twelvelabs":
+        if not settings.twelvelabs_configured:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Transcripts come from Twelve Labs on this server, "
+                    "which is not configured (set TWELVELABS_API_KEY)."
+                ),
+            )
+    elif not settings.transcription_configured:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Transcription is not configured on this server (set STT_API_KEY).",

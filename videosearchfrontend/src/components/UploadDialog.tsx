@@ -157,6 +157,18 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
   // video — there are no client-side bytes to count, so the bar reads as an
   // indeterminate pulse instead of a fake percentage.
   const downloading = mode === 'url' && stage === 0 && !done
+  /**
+   * Indexing with no percentage to report.
+   *
+   * The remote indexer exposes a status, never a fraction, so a numeric bar
+   * would be invented. Both this and `downloading` render the same
+   * indeterminate pulse — honest about not knowing rather than pretending.
+   */
+  const indeterminate =
+    !done &&
+    stage === 1 &&
+    (video?.framesTotal ?? 0) === 0 &&
+    video?.remoteIndexStatus === 'processing'
   const stages = mode === 'url' ? URL_STAGES : FILE_STAGES
 
   useEffect(() => {
@@ -238,7 +250,16 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       current = (await getVideo(record.id)) ?? current
       setVideo(current)
 
-      if (current.status === 'ready') break
+      // `status === 'ready'` no longer means "usable": with local frame
+      // indexing disabled it flips within seconds of upload while the remote
+      // index — the only one that can answer a search — is still building.
+      // Wait for whichever index this server actually populates.
+      const localDone = current.status === 'ready' && current.framesTotal > 0
+      const remoteSettled =
+        current.remoteIndexStatus === 'ready' ||
+        current.remoteIndexStatus === 'failed' ||
+        current.remoteIndexStatus === 'skipped'
+      if (localDone || (current.status === 'ready' && remoteSettled)) break
       if (current.status === 'failed') {
         throw new Error(
           current.error || 'Indexing failed on the server — try another file.',
@@ -247,6 +268,21 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
 
       // `frames_total` is 0 until the server has probed the file. Hold at the
       // start of the indexing band rather than dividing by zero.
+      // No frames to count means the remote indexer is doing the work, and
+      // it reports no percentage — so the bar becomes an indeterminate hold
+      // at the start of the indexing band rather than a fake number.
+      if (current.framesTotal === 0 && current.remoteIndexStatus === 'processing') {
+        if (!indexingStarted) {
+          indexingStarted = true
+          setStage(1)
+          setProgress(UPLOAD_SHARE)
+        }
+        // Nothing to stall-detect against: the remote job reports no
+        // progress, only a terminal status, so keep the clock fresh.
+        lastChange = Date.now()
+        setEta(null)
+      }
+
       if (current.framesTotal > 0) {
         if (!indexingStarted) {
           // URL mode: the download finished and indexing has begun.
@@ -743,10 +779,13 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                   <i
                     className={cn(
                       'block h-full rounded-full bg-brand transition-[width] duration-300',
-                      downloading && 'animate-pulse',
+                      (downloading || indeterminate) && 'animate-pulse',
                     )}
                     style={{
-                      width: downloading ? `${UPLOAD_SHARE}%` : `${progress}%`,
+                      width:
+                        downloading || indeterminate
+                          ? `${UPLOAD_SHARE}%`
+                          : `${progress}%`,
                     }}
                   />
                 </div>
@@ -756,7 +795,9 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
               ) : (
                 <div className="shrink-0 text-right">
                   <span className="block text-[12.5px] font-semibold text-brand">
-                    {downloading ? '…' : `${Math.round(progress)}%`}
+                    {downloading || indeterminate
+                      ? '…'
+                      : `${Math.round(progress)}%`}
                   </span>
                   {eta !== null && (
                     <span className="block text-[11px] text-ink-faint">
