@@ -126,6 +126,16 @@ export const ClockIcon = ({ className }: Props) => (
   </Stroke>
 )
 
+// History: a clock whose rim is the counterclockwise return arrow, so the
+// glyph reads as "past searches" at a glance.
+export const HistoryIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <path d="M4.5 12a7.5 7.5 0 107.5-7.5" />
+    <path d="M4.5 5.5V9h3.5" />
+    <path d="M12 8.5V12l2.4 1.4" />
+  </Stroke>
+)
+
 export const BoltIcon = ({ className }: Props) => (
   <Stroke className={className}>
     <path d="M13.5 3L6 13h4.5l-1 8L18 11h-4.5l1-8z" />

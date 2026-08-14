@@ -89,6 +89,27 @@ internet access.
 > `CORS_ORIGINS` already allows the Vite frontend (port 5174) — no extra setup
 > needed to call this API from the browser.
 
+## Search history
+
+Every search the user runs is recorded so the frontend's **History** tab can
+list past searches, replay their clips, and re-run them:
+
+| Method | Route                  | Auth   | Purpose                                        |
+| ------ | ---------------------- | ------ | ---------------------------------------------- |
+| GET    | `/api/v1/history`      | bearer | List my past searches, newest first            |
+| POST   | `/api/v1/history`      | bearer | Record a search (prompt, video, clips snapshot)| 
+| DELETE | `/api/v1/history/{id}` | bearer | Delete one search                              |
+| DELETE | `/api/v1/history`      | bearer | Clear all my search history                    |
+
+`POST /api/v1/history` with `{"video_id": "…", "prompt": "…", "clips": [{"start": 0, "end": 6, "frame": 3, "score": 0.81}], "expanded": true}`:
+
+1. The video must exist and belong to the user (404 otherwise).
+2. The clips are stored as an immutable **JSONB snapshot** of what the search
+   returned — history replays the exact result, not a re-rank against today's
+   index.
+3. Deleting a video cascades to its history rows (a record with no video left
+   is unplayable).
+
 ## Authentication
 
 Signup, login and session refresh live in `app/auth/`.

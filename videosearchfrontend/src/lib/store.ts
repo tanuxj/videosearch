@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { Clip } from './api'
 import { API_ENABLED, ApiError, apiFetch, getAccessToken, url } from './http'
 
 /**
@@ -496,6 +497,200 @@ export function useVideos(userId: string | undefined): VideoRecord[] {
   }, [refresh, refreshTick])
 
   return videos
+}
+
+/* ── Search history ─────────────────────────────────────── */
+
+/**
+ * One past search: the prompt, the video it ran against, and the clips that
+ * came back. In server mode this lives in the `search_history` table; in demo
+ * mode it persists per user in localStorage (same split as the video library).
+ */
+export type SearchHistoryRecord = {
+  id: string
+  videoId: string
+  prompt: string
+  clips: Clip[]
+  /** True when the backend expanded the prompt into visual variants. */
+  expanded: boolean
+  /** Backend's minimum-similarity threshold for this search. */
+  minScore?: number
+  createdAt: string
+}
+
+/** Backend `SearchHistoryOut` shape (snake_case) — mapped to `SearchHistoryRecord`. */
+type ApiHistoryRecord = {
+  id: string
+  video_id: string
+  prompt: string
+  clips: {
+    id?: string
+    start: number
+    end: number
+    frame: number
+    score: number
+  }[]
+  expanded: boolean
+  min_score: number | null
+  created_at: string
+}
+
+const historyListeners = new Set<() => void>()
+
+function historyKey(userId: string): string {
+  return `vs.history.${userId}`
+}
+
+function emitHistory(): void {
+  for (const listener of historyListeners) listener()
+}
+
+function listHistoryLocal(userId: string): SearchHistoryRecord[] {
+  try {
+    const raw = localStorage.getItem(historyKey(userId))
+    const items = raw ? (JSON.parse(raw) as SearchHistoryRecord[]) : []
+    return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  } catch {
+    return []
+  }
+}
+
+function writeHistoryLocal(userId: string, items: SearchHistoryRecord[]): void {
+  try {
+    localStorage.setItem(historyKey(userId), JSON.stringify(items))
+  } catch {
+    // Quota exceeded — drop the clips (smallest loss; the prompt survives).
+    localStorage.setItem(
+      historyKey(userId),
+      JSON.stringify(items.map(({ clips: _clips, ...rest }) => rest)),
+    )
+  }
+  emitHistory()
+}
+
+function toHistoryRecord(item: ApiHistoryRecord): SearchHistoryRecord {
+  return {
+    id: item.id,
+    videoId: item.video_id,
+    prompt: item.prompt,
+    clips: item.clips.map((clip) => ({
+      id: clip.id ?? `${item.id}-${clip.frame}`,
+      videoId: item.video_id,
+      start: clip.start,
+      end: clip.end,
+      frame: clip.frame,
+      score: clip.score,
+    })),
+    expanded: item.expanded,
+    minScore: item.min_score ?? undefined,
+    createdAt: item.created_at,
+  }
+}
+
+/** The user's past searches, newest first. */
+export async function listHistory(userId: string): Promise<SearchHistoryRecord[]> {
+  if (API_ENABLED) {
+    const data = await apiFetch<{ items: ApiHistoryRecord[] }>('/api/v1/history')
+    return data.items
+      .map(toHistoryRecord)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  }
+  return listHistoryLocal(userId)
+}
+
+/**
+ * Remember a search the user just ran (fire-and-forget from the Search page).
+ *
+ * The clips are an immutable snapshot of what the UI showed, so history
+ * replays the exact result — not a re-rank against today's index.
+ */
+export async function saveSearchRecord(
+  userId: string,
+  record: Omit<SearchHistoryRecord, 'id' | 'createdAt'>,
+): Promise<void> {
+  if (API_ENABLED) {
+    await apiFetch('/api/v1/history', {
+      method: 'POST',
+      body: JSON.stringify({
+        video_id: record.videoId,
+        prompt: record.prompt,
+        clips: record.clips.map(({ id, start, end, frame, score }) => ({
+          id,
+          start,
+          end,
+          frame,
+          score,
+        })),
+        expanded: record.expanded,
+        min_score: record.minScore ?? null,
+      }),
+    })
+    emitHistory()
+    return
+  }
+
+  const entry: SearchHistoryRecord = {
+    id: crypto.randomUUID(),
+    videoId: record.videoId,
+    prompt: record.prompt,
+    clips: record.clips,
+    expanded: record.expanded,
+    minScore: record.minScore,
+    createdAt: new Date().toISOString(),
+  }
+  writeHistoryLocal(userId, [entry, ...listHistoryLocal(userId)])
+}
+
+export async function removeHistoryRecord(userId: string, recordId: string): Promise<void> {
+  if (API_ENABLED) {
+    await apiFetch(`/api/v1/history/${recordId}`, { method: 'DELETE' })
+  } else {
+    writeHistoryLocal(
+      userId,
+      listHistoryLocal(userId).filter((item) => item.id !== recordId),
+    )
+  }
+  emitHistory()
+}
+
+export async function clearHistory(userId: string): Promise<void> {
+  if (API_ENABLED) {
+    await apiFetch('/api/v1/history', { method: 'DELETE' })
+  } else {
+    writeHistoryLocal(userId, [])
+  }
+  emitHistory()
+}
+
+/**
+ * Live view of the user's search history; re-renders when a search is
+ * recorded or removed (via this tab or another one).
+ */
+export function useHistory(userId: string | undefined): SearchHistoryRecord[] {
+  const [records, setRecords] = useState<SearchHistoryRecord[]>([])
+
+  useEffect(() => {
+    const refresh = () => {
+      if (!userId) {
+        setRecords([])
+        return
+      }
+      void listHistory(userId)
+        .then(setRecords)
+        .catch(() => {
+          // Transient failure — keep the current view rather than blanking it.
+        })
+    }
+    refresh()
+    historyListeners.add(refresh)
+    window.addEventListener('storage', refresh)
+    return () => {
+      historyListeners.delete(refresh)
+      window.removeEventListener('storage', refresh)
+    }
+  }, [userId])
+
+  return records
 }
 
 /* ── Media helpers ──────────────────────────────────────── */

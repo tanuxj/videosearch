@@ -5,6 +5,7 @@ import { useAuth } from '../lib/auth'
 import {
   attachSource,
   captureFrames,
+  saveSearchRecord,
   sourceFor,
   streamSourceFor,
   useVideos,
@@ -129,7 +130,35 @@ export default function Search() {
     })
     setSearchError(result.error ?? null)
     setSearching(false)
+
+    // Remember the search for the History page — only when it actually ran.
+    // The clips are a snapshot, so history replays the exact result shown.
+    if (user && !result.error) {
+      void saveSearchRecord(user.id, {
+        videoId: target.id,
+        prompt: trimmed,
+        clips: result.clips,
+        expanded: result.expanded ?? false,
+        minScore: result.minScore,
+      })
+    }
   }
+
+  // A deep link from the History page ("Re-run this search") arrives as
+  // ?v=<video>&q=<prompt>: pick the video as usual, then run the search once
+  // the video is ready. The ref guards against re-running on every render.
+  const autoRanQueryRef = useRef<string | null>(null)
+  useEffect(() => {
+    const q = query.get('q')
+    if (!q || autoRanQueryRef.current === q) return
+    if (!selected || selected.status !== 'ready') return
+    autoRanQueryRef.current = q
+    setPrompt(q)
+    void runSearch(q)
+    // runSearch is stable enough for this effect's purposes — it closes over
+    // the current `selected`, which is already a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, query])
 
   // Real thumbnails, captured from whichever playback source is live (a
   // locally-attached file, a downloaded blob, or the signed edge URL). The

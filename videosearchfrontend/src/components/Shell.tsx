@@ -3,7 +3,13 @@ import { Link, useRoute } from '../lib/router'
 import { initials, useAuth } from '../lib/auth'
 import { cn } from '../lib/cn'
 import { ButtonLink } from './ui/Button'
-import { GridIcon, SearchIcon, SignOutIcon, UploadIcon } from './Icons'
+import {
+  GridIcon,
+  HistoryIcon,
+  SearchIcon,
+  SignOutIcon,
+  UploadIcon,
+} from './Icons'
 import { LogoMark, Wordmark } from './Logo'
 
 export const APP_NAME: string =
@@ -111,6 +117,7 @@ export function MarketingShell({ children }: { children: ReactNode }) {
 
 const NAV_MAIN = [
   { to: '/search', label: 'Search', icon: SearchIcon },
+  { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/dashboard', label: 'Library', icon: GridIcon },
 ]
 
