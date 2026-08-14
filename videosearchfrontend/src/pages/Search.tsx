@@ -88,13 +88,30 @@ export default function Search() {
    * look broken. A video with a remote index and no local one can only be
    * searched remotely, so select that.
    */
+  const hasLocalIndex = (selected?.framesTotal ?? 0) > 0
+  const hasRemoteIndex = selected?.remoteIndexStatus === 'ready'
+
+  /**
+   * Whether the user has chosen an engine for the video now selected.
+   *
+   * Without this the auto-pick below fights them: `selected` is rebuilt from
+   * a fresh object on every library poll (every few seconds), so an effect
+   * watching the object re-runs constantly and would reset the toggle
+   * seconds after each click. Reset when the *video* changes, not when its
+   * row is re-fetched.
+   */
+  const enginePicked = useRef(false)
   useEffect(() => {
-    if (!selected) return
-    const hasLocal = selected.framesTotal > 0
-    const hasRemote = selected.remoteIndexStatus === 'ready'
-    if (!hasLocal && hasRemote) setEngine('twelvelabs')
-    else if (hasLocal && !hasRemote) setEngine('clip')
-  }, [selected])
+    enginePicked.current = false
+  }, [selectedId])
+
+  useEffect(() => {
+    if (enginePicked.current || !selected) return
+    // Depends on the two booleans, not the record, so a poll that changes
+    // nothing relevant does not re-trigger this.
+    if (!hasLocalIndex && hasRemoteIndex) setEngine('twelvelabs')
+    else if (hasLocalIndex && !hasRemoteIndex) setEngine('clip')
+  }, [selected, hasLocalIndex, hasRemoteIndex])
 
   // Switching videos invalidates the previous results.
   useEffect(() => {
@@ -350,7 +367,11 @@ export default function Search() {
                 >
                   {(
                     [
-                      ['clip', 'Visual', 'Local CLIP index — matches what the camera saw'],
+                      [
+                        'clip',
+                        'Visual',
+                        'Local CLIP index — matches what the camera saw',
+                      ],
                       ['twelvelabs', 'Visual + speech', 'Twelve Labs Marengo — also searches what was said'],
                     ] as const
                   ).map(([value, label, title]) => (
@@ -359,8 +380,13 @@ export default function Search() {
                       type="button"
                       title={title}
                       aria-pressed={engine === value}
-                      disabled={value === 'twelvelabs' && selected.remoteIndexStatus !== 'ready'}
-                      onClick={() => setEngine(value)}
+                      disabled={
+                        value === 'twelvelabs' ? !hasRemoteIndex : !hasLocalIndex
+                      }
+                      onClick={() => {
+                        enginePicked.current = true
+                        setEngine(value)
+                      }}
                       className={cn(
                         'cursor-pointer rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors',
                         engine === value
