@@ -61,6 +61,54 @@ Settings are loaded from `.env` (see `.env.example`) via pydantic-settings in
 | `URL_IMPORT_ALLOW_PRIVATE` | `false`                         | SSRF guard — set `true` to allow private/local hosts (tests only!) |
 | `URL_IMPORT_MAX_BATCH` | `50`                                  | Most videos one batch import reserves, after playlist/channel expansion |
 | `URL_IMPORT_EXPAND_PLAYLISTS` | `false`                     | Expand a pasted playlist/channel link into its videos (off: such links are rejected) |
+| `STT_API_KEY`   | _(unset)_                                   | ASR key. **Transcription is off until this is set.** |
+| `STT_BASE_URL`  | `https://api.groq.com/openai/v1`            | Any OpenAI-compatible `/audio/transcriptions` endpoint |
+| `STT_MODEL`     | `whisper-large-v3-turbo`                    | ASR model id |
+| `STT_LANGUAGE`  | _(unset)_                                   | ISO-639-1 hint; unset means auto-detect |
+| `STT_CHUNK_SECONDS` | `600`                                   | Audio is split into chunks this long before upload |
+| `STT_MAX_CONCURRENCY` | `4`                                   | Chunks transcribed in parallel |
+| `STT_NO_SPEECH_THRESHOLD` | `0.6`                             | Drop segments the model flags as probably-not-speech |
+
+## Transcription (subtitles + transcript)
+
+Set `STT_API_KEY` and every indexed video also gets timed text: WebVTT
+subtitles on the player and a clickable transcript. Language is detected
+automatically unless `STT_LANGUAGE` pins it.
+
+The default endpoint is [Groq](https://console.groq.com/keys) —
+`whisper-large-v3-turbo` transcribes an hour of audio in well under a minute
+at roughly $0.04/hr. Any OpenAI-compatible endpoint works; for OpenAI itself
+set `STT_BASE_URL=https://api.openai.com/v1` and `STT_MODEL=whisper-1`.
+
+**Transcription runs alongside frame embedding, not after it.** Speech
+recognition takes seconds where CLIP takes minutes, so a video is routinely
+`status="processing"` with `transcript_status="ready"` — that gap is the
+point. The transcript is readable while the indexing bar is still moving.
+
+How it works (`app/videos/transcribe.py`):
+
+1. ffmpeg (bundled by imageio-ffmpeg — no system install) extracts a mono
+   16 kHz audio stream. An hour of video becomes a few MB, since Whisper
+   resamples to that anyway.
+2. Audio is split into `STT_CHUNK_SECONDS` pieces, each cut with an explicit
+   `-ss` so its offset is exact. Chunks upload concurrently, keeping a long
+   recording near the wall-clock of its slowest chunk.
+3. Segments are stitched onto one timeline and written to
+   `transcript_segments`.
+
+Endpoints:
+
+| Route | Returns |
+| ----- | ------- |
+| `GET /api/v1/videos/{id}/transcript` | JSON segments + detected language + status |
+| `GET /api/v1/videos/{id}/captions.vtt` | WebVTT for a `<track>` element |
+
+`transcript_status` is `pending` → `processing` → `ready` / `failed`, or
+`skipped` when the video has no audio track or no key is configured — so a
+polling client knows when to stop.
+
+Videos with no audio are `skipped`, not `failed`: a silent upload is a normal
+thing, not an error. Transcription failure never fails indexing.
 
 ## URL import (paste-a-link)
 

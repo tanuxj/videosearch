@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Clip } from '../lib/api'
-import { downloadClip, saveBlob } from '../lib/api'
+import { captionsObjectUrl, downloadClip, saveBlob } from '../lib/api'
 import { API_ENABLED } from '../lib/http'
 import type { VideoRecord } from '../lib/store'
 import type { ReactNode } from 'react'
@@ -89,6 +89,43 @@ export function ClipLightbox({
 
   const videoDuration = video?.duration ?? 0
 
+  /**
+   * Subtitles for the player.
+   *
+   * A `<track src>` is fetched by the browser itself and carries no
+   * `Authorization` header, so it can't point at the API directly — the VTT is
+   * pulled through the authenticated client and handed over as a blob: URL,
+   * the same way `src` already handles the video bytes.
+   */
+  const [captions, setCaptions] = useState<string>('')
+  const captionsReady = API_ENABLED && video?.transcriptStatus === 'ready'
+  const captionsFor = captionsReady ? video.id : null
+
+  useEffect(() => {
+    if (!captionsFor) {
+      setCaptions('')
+      return
+    }
+    let objectUrl = ''
+    let cancelled = false
+    captionsObjectUrl(captionsFor)
+      .then((next) => {
+        if (cancelled) {
+          URL.revokeObjectURL(next)
+          return
+        }
+        objectUrl = next
+        setCaptions(next)
+      })
+      .catch(() => {
+        /* no subtitles — the player is still perfectly usable */
+      })
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [captionsFor])
+
   // Seek to the in-point and play whenever the selected match changes. Keyed on
   // clip.id rather than `range`, or every handle drag would restart playback.
   useEffect(() => {
@@ -171,7 +208,22 @@ export function ClipLightbox({
                 playsInline
                 autoPlay
                 className="size-full"
-              />
+              >
+                {/* Keyed on the URL so React swaps the element when the video
+                    changes — mutating a <track>'s src in place leaves the old
+                    cues loaded in some browsers. `default` is what actually
+                    turns subtitles on without the user hunting for the CC menu. */}
+                {captions && (
+                  <track
+                    key={captions}
+                    kind="subtitles"
+                    src={captions}
+                    srcLang={video?.language || 'und'}
+                    label={video?.language ? video.language.toUpperCase() : 'Subtitles'}
+                    default
+                  />
+                )}
+              </video>
             ) : (
               <div className="flex flex-col items-center px-8 text-center text-white/70 [&_svg]:size-8">
                 <FilmIcon />

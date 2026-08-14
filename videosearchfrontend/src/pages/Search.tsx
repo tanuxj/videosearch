@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useLocation } from '../lib/router'
 import { useAuth } from '../lib/auth'
@@ -13,11 +13,12 @@ import {
 import type { VideoRecord } from '../lib/store'
 import { API_ENABLED } from '../lib/http'
 import { SUGGESTIONS, searchClips } from '../lib/api'
-import type { Clip } from '../lib/api'
+import type { Clip, TranscriptSegment } from '../lib/api'
 import { AppShell } from '../components/Shell'
 import { VideoSelect } from '../components/VideoSelect'
 import { UploadDialog } from '../components/UploadDialog'
 import { ClipLightbox } from '../components/ClipLightbox'
+import { TranscriptPanel } from '../components/TranscriptPanel'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 import { Chip, EmptyState, Panel } from '../components/ui/Data'
@@ -109,6 +110,40 @@ export default function Search() {
       cancelled = true
     }
   }, [selectedId, selectedStatus])
+
+  /**
+   * Play a transcript line. The lightbox is the only player in the page, so a
+   * spoken segment is handed to it as a one-off clip rather than being added
+   * to the search results — it isn't a match for the current prompt.
+   */
+  const playSegment = useCallback(
+    (segment: TranscriptSegment) => {
+      if (!selected) return
+      setOpenClip({
+        id: `transcript-${segment.start}`,
+        videoId: selected.id,
+        start: segment.start,
+        // Zero-length cues exist; give the player something to actually play.
+        end: Math.max(segment.end, segment.start + 1),
+        frame: segment.start,
+        score: 1,
+      })
+    },
+    [selected],
+  )
+
+  /**
+   * What the lightbox pages through. A transcript line isn't part of the
+   * result set, so it opens as a set of one instead of reporting itself as
+   * "match 0 of N" with dead prev/next arrows.
+   */
+  const lightboxClips = useMemo(() => {
+    const results = clips ?? []
+    if (openClip && !results.some((item) => item.id === openClip.id)) {
+      return [openClip]
+    }
+    return results
+  }, [clips, openClip])
 
   async function runSearch(text: string) {
     const trimmed = text.trim()
@@ -310,6 +345,11 @@ export default function Search() {
             )}
           </p>
         )}
+
+        {/* Directly under the composer, inside the same column: the transcript
+            belongs to the selected video, so it should be readable the moment
+            one is picked — not buried under a page of search results. */}
+        <TranscriptPanel video={selected} onSeek={playSegment} />
       </div>
 
       {searching && (
@@ -502,7 +542,7 @@ export default function Search() {
 
       <ClipLightbox
         clip={openClip}
-        clips={clips ?? []}
+        clips={lightboxClips}
         video={selected}
         src={src}
         prompt={lastQuery}

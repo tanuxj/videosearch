@@ -11,6 +11,12 @@
 * ``saved_clips`` — scenes the user asked to keep: auto-extracted from a
   URL import that carried a prompt (see ``url_import.py``), stored as
   start/end/frame/score so the library can show them without a search.
+* ``transcript_segments`` — the spoken audio as timed text, one row per
+  segment. Written by ``transcribe.py``, which runs *alongside* frame
+  embedding rather than after it: speech recognition finishes in seconds
+  where CLIP takes minutes, so `transcript_status` is tracked separately
+  from the video's `status` and the frontend can show subtitles while the
+  visual index is still building.
 """
 
 import uuid
@@ -40,6 +46,11 @@ from app.db.base import Base, TimestampMixin
 EMBEDDING_DIM = 512
 
 VIDEO_STATUSES = ("processing", "ready", "failed")
+
+# Transcription runs on its own clock, so it has its own status:
+# `skipped` — no ASR endpoint configured, or the video carries no audio track.
+# `pending` → `processing` → `ready` / `failed` otherwise.
+TRANSCRIPT_STATUSES = ("pending", "processing", "ready", "failed", "skipped")
 
 
 class Video(Base, TimestampMixin):
@@ -75,8 +86,24 @@ class Video(Base, TimestampMixin):
     frames_indexed: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # One of TRANSCRIPT_STATUSES. Deliberately independent of `status`: a
+    # video is commonly `status="processing"` (frames still embedding) while
+    # `transcript_status="ready"`, which is the whole point — the text shows
+    # up long before the visual index finishes.
+    transcript_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    transcript_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Detected (or configured) spoken language, as an ISO-639-1 code where we
+    # recognise it. Used as the subtitle track's `srclang`.
+    language: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     frames: Mapped[list["Frame"]] = relationship(
+        back_populates="video",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    transcript_segments: Mapped[list["TranscriptSegment"]] = relationship(
         back_populates="video",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -87,6 +114,9 @@ class Video(Base, TimestampMixin):
         # writes VIDEO_STATUSES values.
         # The naming convention renders this as `ck_videos_status`.
         CheckConstraint(f"status IN {tuple(VIDEO_STATUSES)}", name="status"),
+        CheckConstraint(
+            f"transcript_status IN {tuple(TRANSCRIPT_STATUSES)}", name="transcript_status"
+        ),
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -137,6 +167,50 @@ class SavedClip(Base, TimestampMixin):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<SavedClip video={self.video_id} t={self.frame} score={self.score:.2f}>"
+
+
+class TranscriptSegment(Base):
+    """One timed line of speech, as returned by the ASR model.
+
+    Segments are whole utterances (a few seconds each), not words — that is
+    the granularity WebVTT cues and a readable transcript both want. `idx` is
+    the segment's position in the video and is what ordering and the
+    `(video_id, idx)` uniqueness both key on; ordering by `start_sec` would be
+    ambiguous for the rare zero-length segment.
+    """
+
+    __tablename__ = "transcript_segments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("videos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Position in the video, 0-based. Chunked transcription re-numbers these
+    # so they stay contiguous across chunk boundaries.
+    idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_sec: Mapped[float] = mapped_column(Float, nullable=False)
+    end_sec: Mapped[float] = mapped_column(Float, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    video: Mapped["Video"] = relationship(back_populates="transcript_segments")
+
+    __table_args__ = (
+        UniqueConstraint("video_id", "idx", name="uq_transcript_segments_video_id_idx"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<TranscriptSegment video={self.video_id} t={self.start_sec}>"
 
 
 class Frame(Base):

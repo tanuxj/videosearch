@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.videos.models import Video
+from app.videos.models import TranscriptSegment, Video
 from app.videos.storage import storage
 
 logger = logging.getLogger(__name__)
@@ -289,8 +289,25 @@ async def get_video(db: AsyncSession, owner_id: uuid.UUID, video_id: uuid.UUID) 
     return video
 
 
+async def list_transcript_segments(
+    db: AsyncSession, video_id: uuid.UUID
+) -> list[TranscriptSegment]:
+    """Every transcript line for a video, in playback order.
+
+    Ordered by `idx` rather than `start_sec`: chunked transcription numbers
+    segments contiguously across chunk boundaries, and two cues can share a
+    start time when a chunk seam falls mid-sentence.
+    """
+    result = await db.execute(
+        select(TranscriptSegment)
+        .where(TranscriptSegment.video_id == video_id)
+        .order_by(TranscriptSegment.idx)
+    )
+    return list(result.scalars())
+
+
 async def delete_video(db: AsyncSession, owner_id: uuid.UUID, video_id: uuid.UUID) -> None:
-    """Remove the row (cascades to frames) and its stored object."""
+    """Remove the row (cascades to frames and transcript segments) and its object."""
     video = await get_video(db, owner_id, video_id)
     await db.delete(video)
     await db.commit()

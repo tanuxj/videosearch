@@ -324,6 +324,8 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       frames: 0,
       framesTotal: expectedFrames,
       status: 'processing',
+      // Demo mode has no server, so there is no transcription to wait for.
+      transcriptStatus: 'skipped',
       createdAt: new Date().toISOString(),
     }
 

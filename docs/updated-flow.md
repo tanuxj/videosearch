@@ -1,5 +1,12 @@
 # Updated Flow — Visual-Only Semantic Video Search
 
+> **Superseded in part.** Sections 2 and 5 below say there is no audio
+> pipeline. That was true when this was written and is no longer: an optional
+> transcription pass now runs *in parallel* with frame embedding, producing
+> subtitles and a clickable transcript. It does not touch search — matching is
+> still CLIP-only, exactly as described here. See
+> [transcription.md](transcription.md).
+
 > **The whole pipeline in one sentence:** upload → pull frames out at regular
 > intervals → turn each frame into a vector with CLIP → save vectors with
 > timestamps → when the user describes a scene in text, turn that into a vector

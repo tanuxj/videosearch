@@ -16,11 +16,19 @@ upload. Design notes:
   keep/candidate ratio each chunk and it converges to the real count.
 * **Failure is explicit.** Any exception marks the video ``failed`` with the
   error message instead of leaving it stuck in ``processing`` forever.
+* **Transcription runs alongside, not after.** Speech recognition is seconds
+  of work against minutes for CLIP, so it is started as its own task on its
+  own session the moment the file is probed. Its progress is reported through
+  ``transcript_status``, independent of ``status``, so subtitles and the
+  transcript reach the user long before the visual index is done.
 """
 
 import asyncio
+import contextlib
 import logging
 import math
+import shutil
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -32,8 +40,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.session import SessionFactory
-from app.videos import embedder
-from app.videos.models import Frame, Video
+from app.videos import embedder, transcribe
+from app.videos.models import Frame, TranscriptSegment, Video
 from app.videos.storage import storage
 
 logger = logging.getLogger(__name__)
@@ -213,6 +221,128 @@ async def _insert_chunk(
     await db.commit()
 
 
+async def _mark_transcript(video_id: uuid.UUID, status: str, error: str | None) -> None:
+    """Record a terminal transcription outcome. Best effort — never raises."""
+    try:
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            if video is None:
+                return
+            video.transcript_status = status
+            video.transcript_error = error[:500] if error else None
+            await db.commit()
+    except Exception:  # pragma: no cover - best effort
+        logger.exception("Could not record transcript status for video %s", video_id)
+
+
+async def _run_transcription(video_id: uuid.UUID, source: Path, duration: float) -> None:
+    """Transcribe one video and persist its segments. Never raises.
+
+    Runs on its own session, concurrently with frame embedding. That is
+    deliberate rather than incidental: committing here is what makes the
+    transcript readable while ``status`` is still ``processing``.
+
+    Sharing a row across two sessions is safe because SQLAlchemy only writes
+    the columns each session actually changed — the frame loop's commits touch
+    ``frames_indexed``/``status``, this one touches ``transcript_status``, and
+    neither clobbers the other's.
+    """
+    if not settings.transcription_configured:
+        await _mark_transcript(video_id, "skipped", None)
+        return
+
+    work_dir = Path(tempfile.mkdtemp(prefix="vs-transcribe-"))
+    try:
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            if video is None:
+                return
+            video.transcript_status = "processing"
+            await db.commit()
+
+        started = time.perf_counter()
+        result = await asyncio.to_thread(transcribe.transcribe, source, duration, work_dir)
+        elapsed = time.perf_counter() - started
+
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            if video is None:
+                return
+            # Re-running the pipeline on a video must not double the transcript.
+            await db.execute(
+                delete(TranscriptSegment).where(TranscriptSegment.video_id == video_id)
+            )
+            if result.segments:
+                await db.execute(
+                    insert(TranscriptSegment),
+                    [
+                        {
+                            "video_id": video_id,
+                            "idx": index,
+                            "start_sec": segment.start,
+                            "end_sec": segment.end,
+                            "text": segment.text,
+                        }
+                        for index, segment in enumerate(result.segments)
+                    ],
+                )
+            video.language = result.language
+            video.transcript_status = "ready"
+            video.transcript_error = None
+            await db.commit()
+
+        logger.info(
+            "Transcribed video %s: %d segments, language=%s, in %.1fs",
+            video_id,
+            len(result.segments),
+            result.language or "unknown",
+            elapsed,
+        )
+    except transcribe.NoAudioTrack as exc:
+        # A silent video is a normal thing to upload, not a failure.
+        logger.info("No audio to transcribe for video %s: %s", video_id, exc)
+        await _mark_transcript(video_id, "skipped", None)
+    except Exception as exc:  # noqa: BLE001 - transcription must not fail indexing
+        logger.exception("Transcription failed for video %s", video_id)
+        await _mark_transcript(video_id, "failed", str(exc))
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+async def transcribe_existing(video_id: uuid.UUID) -> None:
+    """Run only the transcription pass on an already-indexed video.
+
+    Frames are left completely alone. This exists because a video indexed
+    before transcription was added — or one whose transcription failed, or
+    that was indexed while no ASR key was configured — otherwise has no route
+    to a transcript short of deleting and re-uploading it.
+    """
+    local_path: Path | None = None
+    owns_local_file = False
+    try:
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            if video is None:
+                return
+            storage_key = video.storage_key
+            duration = video.duration_seconds or 0.0
+
+        # Same ownership rule as the indexing path: the local backend hands
+        # back the stored object itself, which must survive.
+        local_path = await asyncio.to_thread(storage.get_local_path, storage_key)
+        owns_local_file = storage.backend == "r2"
+
+        # If the file has no usable duration recorded, transcribe it whole —
+        # `_chunk_audio` treats 0 as "shorter than the chunk limit".
+        await _run_transcription(video_id, local_path, duration)
+    except Exception as exc:  # noqa: BLE001 - must not escape a background task
+        logger.exception("Re-transcription failed for video %s", video_id)
+        await _mark_transcript(video_id, "failed", str(exc))
+    finally:
+        if local_path is not None and owns_local_file:
+            local_path.unlink(missing_ok=True)
+
+
 async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> None:
     """Run the full indexing pipeline for one video. Idempotent per video.
 
@@ -228,6 +358,7 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
     # Only remove files we own — for the local backend `get_local_path` returns
     # the stored object itself, which must survive.
     owns_local_file = source_path is not None
+    transcript_task: asyncio.Task | None = None
     try:
         async with SessionFactory() as db:
             video = await db.get(Video, video_id)
@@ -246,6 +377,14 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
             video.duration_seconds = duration
             video.frames_total = expected
             await db.commit()
+
+            # Kicked off here, before any embedding: the transcript typically
+            # lands within seconds, so the user is reading it while the bar
+            # below it is still filling. Awaited in `finally` — the local file
+            # must outlive it.
+            transcript_task = asyncio.create_task(
+                _run_transcription(video_id, local_path, duration)
+            )
 
             max_gap_frames = max(
                 1, math.ceil(settings.scene_max_gap_seconds / settings.frame_interval_seconds)
@@ -331,6 +470,13 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
         except Exception:  # pragma: no cover - best effort
             logger.exception("Could not mark video %s as failed", video_id)
     finally:
+        # Transcription reads the same local file, so it has to finish before
+        # the file goes away — including on the failure path, where frames blew
+        # up but the transcript may still be mid-flight. It swallows its own
+        # errors; `suppress` is for cancellation propagating in.
+        if transcript_task is not None:
+            with contextlib.suppress(Exception):
+                await transcript_task
         # Either the upload handler's spilled copy or a temp file downloaded
         # from R2. Never the stored object itself (local backend).
         if local_path is not None and owns_local_file:
