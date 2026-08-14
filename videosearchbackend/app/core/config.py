@@ -116,6 +116,15 @@ class Settings(BaseSettings):
     # Start the indexing job automatically on upload. Tests flip this off
     # so uploads stay `processing` until the test runs the pipeline itself.
     index_on_upload: bool = True
+    # Whether the local CLIP frame index is built at all.
+    #
+    # Distinct from `index_on_upload`, which decides if the pipeline runs:
+    # this decides whether the *frame embedding* part of it runs. Turning it
+    # off leaves transcription and the Twelve Labs index working — they are
+    # the parts that do not spend minutes of local CPU — so a video is ready
+    # in the time it takes someone else's GPUs to do the work. Search must
+    # then use `engine=twelvelabs`, since no local vectors will exist.
+    clip_index_enabled: bool = True
     # Frames are sampled at this interval (seconds). 1.0 = one frame per second.
     frame_interval_seconds: float = 1.0
     # Scene-aware sampling: a sampled frame is embedded only when its picture
@@ -189,6 +198,35 @@ class Settings(BaseSettings):
     # to the user as real dialogue.
     stt_no_speech_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
 
+    # ── Twelve Labs (Marengo) — alternative index ───────────────
+    # A managed, video-native alternative to the local CLIP index. Runs in
+    # parallel with it rather than replacing it, so the two can be compared on
+    # real footage. Off until `twelvelabs_api_key` is set.
+    twelvelabs_api_key: str | None = None
+    twelvelabs_base_url: str = "https://api.twelvelabs.io/v1.3"
+    twelvelabs_model: str = "marengo3.0"
+    # Bind to an index by name so a fresh environment needs no manual setup;
+    # set `twelvelabs_index_id` to pin an existing one instead.
+    twelvelabs_index_name: str = "videosearch"
+    twelvelabs_index_id: str | None = None
+    # Modalities Marengo searches. CLIP is visual-only, so `audio` is exactly
+    # the capability worth measuring the difference on.
+    #
+    # Deliberately a comma-separated **string** rather than a `list[str]`:
+    # pydantic-settings JSON-decodes complex types straight from the
+    # environment *before* any field validator runs, so `visual,audio` in a
+    # compose file fails to parse and takes the whole app down at import time.
+    # Parsed by `twelvelabs_modalities` instead.
+    twelvelabs_search_options: str = "visual,audio"
+    twelvelabs_timeout_seconds: float = Field(default=120.0, ge=5.0, le=900.0)
+    # Start a remote index automatically on upload, alongside the CLIP pass.
+    # Off by default: it spends the account's indexing minutes on every video,
+    # which should be a deliberate choice rather than a surprise.
+    twelvelabs_index_on_upload: bool = False
+    # Polling cadence and ceiling while waiting for remote indexing.
+    twelvelabs_poll_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
+    twelvelabs_max_wait_seconds: float = Field(default=3600.0, ge=60.0, le=21_600.0)
+
     # ── URL import (paste-a-link) ───────────────────────────────
     # Let users index videos by pasting a URL (YouTube, Twitch, Zoom,
     # Vimeo, or a direct video file link). The backend downloads the video
@@ -230,6 +268,16 @@ class Settings(BaseSettings):
     postgres_db: str = "videosearch"
     postgres_user: str = "videosearch"
     postgres_password: str = "videosearch"
+
+    @property
+    def twelvelabs_configured(self) -> bool:
+        """True when the Twelve Labs index is usable."""
+        return bool(self.twelvelabs_api_key)
+
+    @property
+    def twelvelabs_modalities(self) -> list[str]:
+        """`twelvelabs_search_options` parsed into the modalities to search."""
+        return [item.strip() for item in self.twelvelabs_search_options.split(",") if item.strip()]
 
     @field_validator("cors_origins", mode="before")
     @classmethod

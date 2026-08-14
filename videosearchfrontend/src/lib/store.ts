@@ -38,6 +38,15 @@ export type VideoStatus = 'processing' | 'ready' | 'failed'
  * `'skipped'` means there will never be one (no audio track, or the server has
  * no ASR endpoint configured), so the UI can stop waiting.
  */
+/**
+ * The Twelve Labs (Marengo) index's lifecycle, tracked separately again.
+ *
+ * Built on their GPUs from a URL they fetch themselves, so it is independent
+ * of both the local CLIP index and transcription. `'skipped'` means it will
+ * never exist — no API key, or storage that cannot hand out a fetchable URL.
+ */
+export type RemoteIndexStatus = TranscriptStatus
+
 export type TranscriptStatus =
   | 'pending'
   | 'processing'
@@ -62,6 +71,9 @@ export type VideoRecord = {
   framesTotal: number
   status: VideoStatus
   transcriptStatus: TranscriptStatus
+  /** Whether this video is searchable through the Twelve Labs index. */
+  remoteIndexStatus: RemoteIndexStatus
+  remoteIndexError?: string
   /** Detected spoken language (ISO-639-1 where known) — the track's srclang. */
   language?: string
   createdAt: string
@@ -82,6 +94,8 @@ type ApiVideo = {
   frames_total: number
   frames_indexed: number
   transcript_status?: TranscriptStatus
+  remote_index_status?: RemoteIndexStatus
+  remote_index_error?: string | null
   language?: string | null
   created_at: string
 }
@@ -140,6 +154,8 @@ function toRecord(video: ApiVideo): VideoRecord {
     // An older backend omits these entirely — treat that as "no transcript
     // coming" rather than leaving the UI polling forever.
     transcriptStatus: video.transcript_status ?? 'skipped',
+    remoteIndexStatus: video.remote_index_status ?? 'skipped',
+    remoteIndexError: video.remote_index_error ?? undefined,
     language: video.language ?? undefined,
     createdAt: video.created_at,
     error: video.error ?? undefined,
@@ -583,7 +599,8 @@ function isSettling(video: VideoRecord): boolean {
   return (
     video.status === 'processing' ||
     video.transcriptStatus === 'pending' ||
-    video.transcriptStatus === 'processing'
+    video.transcriptStatus === 'processing' ||
+    video.remoteIndexStatus === 'processing'
   )
 }
 

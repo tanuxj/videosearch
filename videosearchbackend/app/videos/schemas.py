@@ -25,6 +25,12 @@ class VideoOut(BaseModel):
     transcript_status: str
     # Detected spoken language (ISO-639-1 where recognised), once known.
     language: str | None = None
+    # The Twelve Labs (Marengo) index's own lifecycle — `pending` |
+    # `processing` | `ready` | `failed` | `skipped`. Independent of `status`:
+    # it is built on their GPUs, so it can be ready long before (or without)
+    # the local CLIP index.
+    remote_index_status: str = "pending"
+    remote_index_error: str | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -76,6 +76,24 @@ x-backend-env: &backend_env
   STT_MAX_CONCURRENCY: ${STT_MAX_CONCURRENCY:-4}
   STT_TIMEOUT_SECONDS: ${STT_TIMEOUT_SECONDS:-300}
   STT_NO_SPEECH_THRESHOLD: ${STT_NO_SPEECH_THRESHOLD:-0.6}
+  # Twelve Labs (Marengo) — the managed video-native index that runs beside
+  # the local CLIP one. Same trap as STT_API_KEY: an empty key silently
+  # disables it, so this must be passed through or the container reports
+  # "not configured" however the host .env is set up.
+  TWELVELABS_API_KEY: ${TWELVELABS_API_KEY:-}
+  TWELVELABS_BASE_URL: ${TWELVELABS_BASE_URL:-https://api.twelvelabs.io/v1.3}
+  TWELVELABS_MODEL: ${TWELVELABS_MODEL:-marengo3.0}
+  TWELVELABS_INDEX_NAME: ${TWELVELABS_INDEX_NAME:-videosearch}
+  TWELVELABS_INDEX_ID: ${TWELVELABS_INDEX_ID:-}
+  TWELVELABS_SEARCH_OPTIONS: ${TWELVELABS_SEARCH_OPTIONS:-visual,audio}
+  TWELVELABS_INDEX_ON_UPLOAD: ${TWELVELABS_INDEX_ON_UPLOAD:-false}
+  TWELVELABS_TIMEOUT_SECONDS: ${TWELVELABS_TIMEOUT_SECONDS:-120}
+  TWELVELABS_POLL_SECONDS: ${TWELVELABS_POLL_SECONDS:-10}
+  TWELVELABS_MAX_WAIT_SECONDS: ${TWELVELABS_MAX_WAIT_SECONDS:-3600}
+  # Whether the local CLIP frame index is built at all. Off means uploads are
+  # ready as soon as the remote index is, with no local embedding — search
+  # then has to use engine=twelvelabs.
+  CLIP_INDEX_ENABLED: ${CLIP_INDEX_ENABLED:-true}
   # Inside the compose network the DB host is the service name "db".
   POSTGRES_HOST: db
   POSTGRES_PORT: 5432

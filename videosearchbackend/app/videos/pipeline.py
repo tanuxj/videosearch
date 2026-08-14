@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.session import SessionFactory
-from app.videos import embedder, transcribe
+from app.videos import embedder, transcribe, twelvelabs
 from app.videos.models import Frame, TranscriptSegment, Video
 from app.videos.storage import storage
 
@@ -309,6 +309,150 @@ async def _run_transcription(video_id: uuid.UUID, source: Path, duration: float)
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+async def _mark_remote(video_id: uuid.UUID, status: str, error: str | None) -> None:
+    """Record a terminal remote-index outcome. Best effort — never raises."""
+    try:
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            if video is None:
+                return
+            video.remote_index_status = status
+            video.remote_index_error = error[:500] if error else None
+            await db.commit()
+    except Exception:  # pragma: no cover - best effort
+        logger.exception("Could not record remote index status for video %s", video_id)
+
+
+async def index_remotely(video_id: uuid.UUID) -> None:
+    """Index one video with Twelve Labs (Marengo). Never raises.
+
+    Runs beside the CLIP pass rather than replacing it, so the two indexes can
+    be compared on real footage. Crucially the bytes never touch this process:
+    ``POST /assets`` takes a presigned URL and they fetch the object from R2
+    directly, skipping the multi-minute download that dominates local indexing
+    of a large file.
+    """
+    if not settings.twelvelabs_configured:
+        await _mark_remote(video_id, "skipped", None)
+        return
+
+    try:
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            if video is None:
+                return
+            storage_key, name = video.storage_key, video.name
+            video.remote_index_status = "processing"
+            video.remote_index_error = None
+            await db.commit()
+
+        # They pull over the network, so a bucket-less (local disk) backend
+        # cannot participate at all — say so plainly rather than failing deep
+        # inside an HTTP call with something unhelpful.
+        source_url = await asyncio.to_thread(
+            storage.presign_get, storage_key, settings.presign_url_ttl_seconds
+        )
+        if not source_url:
+            await _mark_remote(
+                video_id,
+                "skipped",
+                "Storage cannot presign a URL for the remote indexer to fetch.",
+            )
+            return
+
+        started = time.perf_counter()
+        deadline = started + settings.twelvelabs_max_wait_seconds
+        index_id = await asyncio.to_thread(twelvelabs.ensure_index)
+
+        # Reuse an asset from an earlier attempt. Creating a second one for
+        # the same video would upload it twice and leave the first orphaned in
+        # their storage, billed and invisible.
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            asset_id = video.remote_asset_id if video is not None else None
+
+        if not asset_id:
+            asset_id = await asyncio.to_thread(
+                twelvelabs.create_asset_from_url, source_url, name
+            )
+            # Persisted before the next call, which can fail — otherwise the
+            # id is lost and the retry uploads the whole file again.
+            async with SessionFactory() as db:
+                video = await db.get(Video, video_id)
+                if video is not None:
+                    video.remote_asset_id = asset_id
+                    await db.commit()
+
+        # First wait: they fetch and probe the file. Indexing before this
+        # settles is rejected outright.
+        while True:
+            state = await asyncio.to_thread(twelvelabs.asset, asset_id)
+            status = str(state.get("status") or "").lower()
+            if status in twelvelabs.DONE_STATUSES:
+                break
+            if status in twelvelabs.FAILED_STATUSES:
+                await _mark_remote(video_id, "failed", f"Asset upload {status}: {state}")
+                return
+            if time.perf_counter() > deadline:
+                await _mark_remote(
+                    video_id, "failed", f"Asset never became ready (last status: {status!r})."
+                )
+                return
+            await asyncio.sleep(settings.twelvelabs_poll_seconds)
+
+        logger.info(
+            "Asset ready for video %s in %.1fs; starting index",
+            video_id,
+            time.perf_counter() - started,
+        )
+        indexed_id = await asyncio.to_thread(twelvelabs.index_asset, index_id, asset_id)
+
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            if video is not None:
+                video.remote_indexed_asset_id = indexed_id
+                await db.commit()
+
+        # Second wait: the index itself builds. Shares the deadline set above,
+        # so the two stages together cannot exceed the configured ceiling.
+        # `asyncio.sleep`, never a blocking one — this coroutine shares the
+        # loop with every request the API is serving.
+        while True:
+            state = await asyncio.to_thread(twelvelabs.indexed_asset, index_id, indexed_id)
+            status, remote_video_id = twelvelabs.job_state(state)
+
+            if status in twelvelabs.DONE_STATUSES:
+                async with SessionFactory() as db:
+                    video = await db.get(Video, video_id)
+                    if video is not None:
+                        video.remote_video_id = remote_video_id
+                        video.remote_index_status = "ready"
+                        video.remote_index_error = None
+                        await db.commit()
+                logger.info(
+                    "Remote-indexed video %s in %.1fs (remote id %s)",
+                    video_id,
+                    time.perf_counter() - started,
+                    remote_video_id,
+                )
+                return
+            if status in twelvelabs.FAILED_STATUSES:
+                await _mark_remote(video_id, "failed", f"Remote indexing {status}: {state}")
+                return
+            if time.perf_counter() > deadline:
+                await _mark_remote(
+                    video_id,
+                    "failed",
+                    f"Remote indexing did not finish within "
+                    f"{settings.twelvelabs_max_wait_seconds:.0f}s (last status: {status!r}).",
+                )
+                return
+            await asyncio.sleep(settings.twelvelabs_poll_seconds)
+    except Exception as exc:  # noqa: BLE001 - must never fail local indexing
+        logger.exception("Remote indexing failed for video %s", video_id)
+        await _mark_remote(video_id, "failed", str(exc))
+
+
 async def transcribe_existing(video_id: uuid.UUID) -> None:
     """Run only the transcription pass on an already-indexed video.
 
@@ -359,6 +503,7 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
     # the stored object itself, which must survive.
     owns_local_file = source_path is not None
     transcript_task: asyncio.Task | None = None
+    remote_task: asyncio.Task | None = None
     try:
         async with SessionFactory() as db:
             video = await db.get(Video, video_id)
@@ -385,6 +530,27 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
             transcript_task = asyncio.create_task(
                 _run_transcription(video_id, local_path, duration)
             )
+
+            # Third parallel pass. Unlike transcription it needs nothing from
+            # the local file — they fetch it from R2 themselves — so it is not
+            # awaited before the file is deleted, only before the function
+            # returns, and it is opt-in because it spends account minutes.
+            if settings.twelvelabs_index_on_upload:
+                remote_task = asyncio.create_task(index_remotely(video_id))
+
+            # CLIP off: there is nothing local to grind through, so the video
+            # is immediately as ready as it will ever be. The other two passes
+            # were already started above and finish on their own clocks —
+            # which is the entire point of running the remote index instead:
+            # no decode, no embedding, no waiting on this machine at all.
+            if not settings.clip_index_enabled:
+                video.frames_total = 0
+                video.status = "ready"
+                await db.commit()
+                logger.info(
+                    "Skipped CLIP indexing for video %s (clip_index_enabled=false)", video_id
+                )
+                return
 
             max_gap_frames = max(
                 1, math.ceil(settings.scene_max_gap_seconds / settings.frame_interval_seconds)
@@ -477,6 +643,12 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
         if transcript_task is not None:
             with contextlib.suppress(Exception):
                 await transcript_task
+        # Awaited so the job is not orphaned when this task ends, but it holds
+        # no claim on the local file — it can outlive the deletion below
+        # without consequence.
+        if remote_task is not None:
+            with contextlib.suppress(Exception):
+                await remote_task
         # Either the upload handler's spilled copy or a temp file downloaded
         # from R2. Never the stored object itself (local backend).
         if local_path is not None and owns_local_file:

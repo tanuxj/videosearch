@@ -53,16 +53,18 @@ const UPLOAD_SHARE = 30
  */
 const FILE_STAGES = [
   { label: 'Uploading file' },
-  { label: 'Indexing frames (1 fps)' },
-  { label: 'Ready to search' },
+  // Deliberately not "Indexing frames": which index gets built is a server
+  // setting, and naming CLIP here was a lie whenever it was turned off.
+  { label: 'Indexing' },
+  { label: 'Ready' },
 ]
 
 // URL imports swap the first stage for the server-side download — the client
 // has no bytes to count, so it holds here until the first frames appear.
 const URL_STAGES = [
   { label: 'Downloading video' },
-  { label: 'Indexing frames (1 fps)' },
-  { label: 'Ready to search' },
+  { label: 'Indexing' },
+  { label: 'Ready' },
 ]
 
 /** How long indexing may report no new frames before we call it stuck. */
@@ -324,8 +326,10 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       frames: 0,
       framesTotal: expectedFrames,
       status: 'processing',
-      // Demo mode has no server, so there is no transcription to wait for.
+      // Demo mode has no server, so neither transcription nor the remote
+      // index will ever run for this record.
       transcriptStatus: 'skipped',
+      remoteIndexStatus: 'skipped',
       createdAt: new Date().toISOString(),
     }
 
@@ -485,7 +489,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       open={open}
       onClose={onClose}
       title="Add a video"
-      subtitle="Frames are extracted once per second and embedded with CLIP."
+      subtitle="Uploads are indexed for search. Long videos stay playable while that finishes."
     >
       <div className="p-5">
         {error && (

@@ -12,8 +12,8 @@ import {
 } from '../lib/store'
 import type { VideoRecord } from '../lib/store'
 import { API_ENABLED } from '../lib/http'
-import { SUGGESTIONS, searchClips } from '../lib/api'
-import type { Clip, TranscriptSegment } from '../lib/api'
+import { SUGGESTIONS, searchClips, startRemoteIndex } from '../lib/api'
+import type { Clip, SearchEngine, TranscriptSegment } from '../lib/api'
 import { AppShell } from '../components/Shell'
 import { VideoSelect } from '../components/VideoSelect'
 import { UploadDialog } from '../components/UploadDialog'
@@ -26,6 +26,7 @@ import { Shimmer } from '../components/ui/Motion'
 import { Spinner } from '../components/AuthLayout'
 import { PlayIcon, SearchIcon, SparkIcon, UploadIcon } from '../components/Icons'
 import { timecode } from '../lib/format'
+import { cn } from '../lib/cn'
 
 export default function Search() {
   const { user } = useAuth()
@@ -38,6 +39,13 @@ export default function Search() {
   const [thumbs, setThumbs] = useState<Map<number, string>>(new Map())
   const [openClip, setOpenClip] = useState<Clip | null>(null)
   const [searching, setSearching] = useState(false)
+  /**
+   * Which index answers. CLIP is local and visual-only; Marengo is remote and
+   * also searches speech, so it can answer "what was said" questions CLIP
+   * structurally cannot.
+   */
+  const [engine, setEngine] = useState<SearchEngine>('clip')
+  const [indexingRemote, setIndexingRemote] = useState(false)
   const [meta, setMeta] = useState<{
     source: string
     tookMs: number
@@ -71,6 +79,22 @@ export default function Search() {
     () => videos.find((video) => video.id === selectedId) ?? null,
     [videos, selectedId],
   )
+
+  /**
+   * Pick the engine that can actually answer for this video.
+   *
+   * With local CLIP indexing turned off server-side, new videos have no
+   * frames at all — defaulting to `clip` would show an empty result set and
+   * look broken. A video with a remote index and no local one can only be
+   * searched remotely, so select that.
+   */
+  useEffect(() => {
+    if (!selected) return
+    const hasLocal = selected.framesTotal > 0
+    const hasRemote = selected.remoteIndexStatus === 'ready'
+    if (!hasLocal && hasRemote) setEngine('twelvelabs')
+    else if (hasLocal && !hasRemote) setEngine('clip')
+  }, [selected])
 
   // Switching videos invalidates the previous results.
   useEffect(() => {
@@ -145,10 +169,34 @@ export default function Search() {
     return results
   }, [clips, openClip])
 
+  /**
+   * Build the remote index for the selected video.
+   *
+   * Fire-and-forget: the server answers as soon as the job is queued, and the
+   * library poll (which treats `processing` as still-settling) carries the
+   * status the rest of the way.
+   */
+  async function enableRemoteIndex() {
+    if (!selected) return
+    setIndexingRemote(true)
+    try {
+      await startRemoteIndex(selected.id)
+    } catch {
+      /* the status chip reports the failure on the next poll */
+    } finally {
+      setIndexingRemote(false)
+    }
+  }
+
   async function runSearch(text: string) {
     const trimmed = text.trim()
     const target = selected
-    if (!trimmed || !target || target.status !== 'ready') return
+    if (!trimmed || !target) return
+    const ready =
+      engine === 'twelvelabs'
+        ? target.remoteIndexStatus === 'ready'
+        : target.status === 'ready'
+    if (!ready) return
 
     setSearching(true)
     setOpenClip(null)
@@ -156,7 +204,7 @@ export default function Search() {
     setLastQuery(trimmed)
     setSearchError(null)
 
-    const result = await searchClips(target, trimmed)
+    const result = await searchClips(target, trimmed, 9, engine)
     setClips(result.clips)
     setMeta({
       source: result.source,
@@ -220,10 +268,31 @@ export default function Search() {
     }
   }
 
-  const canSearch =
-    selected?.status === 'ready' &&
-    Boolean(prompt.trim()) &&
-    !searching
+  /**
+   * The two engines have different readiness requirements: CLIP needs every
+   * frame embedded locally, while Marengo is built remotely and cares nothing
+   * for the local index. Gating both on `status === 'ready'` would block
+   * speech search on a video whose frames are still grinding away.
+   */
+  const engineReady =
+    engine === 'twelvelabs'
+      ? selected?.remoteIndexStatus === 'ready'
+      : selected?.status === 'ready'
+
+  /**
+   * Whether *any* index can answer a query about this video.
+   *
+   * With local indexing disabled a video reports `status: 'ready'` with zero
+   * frames almost immediately, so `status` alone no longer means "usable" —
+   * it only means the pipeline is no longer working on the file locally.
+   */
+  const searchable = Boolean(
+    selected &&
+      ((selected.status === 'ready' && selected.framesTotal > 0) ||
+        selected.remoteIndexStatus === 'ready'),
+  )
+
+  const canSearch = Boolean(engineReady) && Boolean(prompt.trim()) && !searching
 
   return (
     <AppShell
@@ -251,16 +320,77 @@ export default function Search() {
               onSelect={setSelectedId}
               onUpload={() => setUploadOpen(true)}
             />
+            {/* Reports whether the video is *searchable*, which is not the
+                same as `status === 'ready'` once local CLIP indexing is off:
+                such a video is "ready" with zero frames the moment it is
+                probed, while the only index that can answer is still being
+                built remotely. Claiming "Indexed" there is simply untrue. */}
             {selected &&
-              (selected.status === 'ready' ? (
-                <Chip tone="ok">Indexed</Chip>
-              ) : selected.status === 'failed' ? (
+              (selected.status === 'failed' ? (
+                <Chip tone="danger">Indexing failed</Chip>
+              ) : searchable ? (
+                <Chip tone="ok">Searchable</Chip>
+              ) : selected.remoteIndexStatus === 'failed' ? (
                 <Chip tone="danger">Indexing failed</Chip>
               ) : (
                 <Chip tone="warn" pulse>
                   Indexing
                 </Chip>
               ))}
+
+            {/* Engine switch. Only shown when there is a real choice — with
+                no remote index the toggle would offer an option that always
+                errors. */}
+            {selected && API_ENABLED && (
+              <div className="ml-auto flex items-center gap-1.5">
+                <div
+                  role="group"
+                  aria-label="Search engine"
+                  className="flex rounded-lg border border-line p-0.5"
+                >
+                  {(
+                    [
+                      ['clip', 'Visual', 'Local CLIP index — matches what the camera saw'],
+                      ['twelvelabs', 'Visual + speech', 'Twelve Labs Marengo — also searches what was said'],
+                    ] as const
+                  ).map(([value, label, title]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      title={title}
+                      aria-pressed={engine === value}
+                      disabled={value === 'twelvelabs' && selected.remoteIndexStatus !== 'ready'}
+                      onClick={() => setEngine(value)}
+                      className={cn(
+                        'cursor-pointer rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors',
+                        engine === value
+                          ? 'bg-brand-wash text-brand'
+                          : 'text-ink-dim hover:text-ink',
+                        'disabled:cursor-default disabled:opacity-40',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {selected.remoteIndexStatus === 'processing' ? (
+                  <Chip tone="brand" pulse>
+                    Indexing remotely
+                  </Chip>
+                ) : selected.remoteIndexStatus !== 'ready' ? (
+                  <button
+                    type="button"
+                    disabled={indexingRemote}
+                    onClick={() => void enableRemoteIndex()}
+                    title="Build a Twelve Labs index for this video so speech becomes searchable"
+                    className="cursor-pointer text-[12px] font-medium text-brand underline underline-offset-2 transition-opacity hover:opacity-75 disabled:opacity-50"
+                  >
+                    {indexingRemote ? 'Starting…' : 'Enable speech search'}
+                  </button>
+                ) : null}
+              </div>
+            )}
           </div>
 
           <textarea
@@ -453,8 +583,17 @@ export default function Search() {
 
                         <span className="mt-2.5 block px-0.5">
                           <span className="block truncate text-[13.5px] font-medium text-ink">
-                            Frame at {timecode(clip.frame)}
+                            {clip.text ? `Said at ${timecode(clip.start)}` : `Frame at ${timecode(clip.frame)}`}
                           </span>
+
+                          {/* Marengo returns the speech that matched — it is
+                              the clearest possible answer to "why this clip?",
+                              which a similarity number never is. */}
+                          {clip.text && (
+                            <span className="mt-1 line-clamp-2 block text-[12.5px] leading-snug text-ink-dim">
+                              “{clip.text}”
+                            </span>
+                          )}
 
                           {/* Match meter. Track is a lighter step of the same
                               hue as the fill so the whole bar reads as one

@@ -832,6 +832,54 @@ async def start_transcription(
     return VideoOut.model_validate(video)
 
 
+@router.post(
+    "/{video_id}/remote-index",
+    response_model=VideoOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Index this video with Twelve Labs (Marengo)",
+    description=(
+        "Starts a remote index alongside the local CLIP one, leaving frames "
+        "and transcript untouched. The video is fetched by the provider from "
+        "a presigned storage URL, so no bytes pass through this API. Use this "
+        "to backfill videos indexed before the integration existed, or to "
+        "retry a failed run."
+    ),
+    responses={
+        404: {"description": "Video not found"},
+        409: {"description": "Remote indexing unavailable or already running"},
+    },
+)
+async def start_remote_index(
+    user: CurrentUser,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
+    video_id: uuid.UUID,
+) -> VideoOut:
+    try:
+        video = await videos_service.get_video(db, user.id, video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+
+    if not settings.twelvelabs_configured:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Remote indexing is not configured on this server (set TWELVELABS_API_KEY).",
+        )
+    if video.remote_index_status == "processing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This video is already being indexed remotely.",
+        )
+
+    video.remote_index_status = "pending"
+    video.remote_index_error = None
+    await db.commit()
+    await db.refresh(video)
+
+    background_tasks.add_task(pipeline.index_remotely, video.id)
+    return VideoOut.model_validate(video)
+
+
 @router.get(
     "/{video_id}/captions.vtt",
     response_class=PlainTextResponse,

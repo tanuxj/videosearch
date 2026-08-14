@@ -52,6 +52,13 @@ VIDEO_STATUSES = ("processing", "ready", "failed")
 # `pending` → `processing` → `ready` / `failed` otherwise.
 TRANSCRIPT_STATUSES = ("pending", "processing", "ready", "failed", "skipped")
 
+# Remote (Twelve Labs) indexing has its own clock again, for the same reason
+# transcription does — it runs on their GPUs while CLIP grinds locally.
+# `skipped` means no remote index will ever exist for this video: either no
+# API key is configured, or the storage backend cannot hand out a URL for
+# them to fetch.
+REMOTE_INDEX_STATUSES = ("pending", "processing", "ready", "failed", "skipped")
+
 
 class Video(Base, TimestampMixin):
     __tablename__ = "videos"
@@ -94,6 +101,21 @@ class Video(Base, TimestampMixin):
         String(16), nullable=False, default="pending", server_default=text("'pending'")
     )
     transcript_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # One of REMOTE_INDEX_STATUSES — the Twelve Labs (Marengo) index, which
+    # runs alongside the local CLIP one so the two can be compared on real
+    # footage. Independent of `status` for the same reason `transcript_status`
+    # is: it finishes on someone else's GPUs, on its own schedule.
+    remote_index_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    remote_index_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Their ids for this video: `asset` is the uploaded file, `indexed_asset`
+    # is that file's membership of one index. Search results come back keyed
+    # by a third id (`video_id`), so that is stored too — it is what maps a
+    # hit back to a row here.
+    remote_asset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    remote_indexed_asset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    remote_video_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # Detected (or configured) spoken language, as an ISO-639-1 code where we
     # recognise it. Used as the subtitle track's `srclang`.
     language: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -116,6 +138,9 @@ class Video(Base, TimestampMixin):
         CheckConstraint(f"status IN {tuple(VIDEO_STATUSES)}", name="status"),
         CheckConstraint(
             f"transcript_status IN {tuple(TRANSCRIPT_STATUSES)}", name="transcript_status"
+        ),
+        CheckConstraint(
+            f"remote_index_status IN {tuple(REMOTE_INDEX_STATUSES)}", name="remote_index_status"
         ),
     )
 

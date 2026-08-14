@@ -8,6 +8,9 @@ import { API_ENABLED, apiFetch, getAccessToken, url } from './http'
  * running.
  */
 
+/** Which index answers a search. */
+export type SearchEngine = 'clip' | 'twelvelabs'
+
 export type Clip = {
   id: string
   videoId: string
@@ -18,6 +21,13 @@ export type Clip = {
   frame: number
   /** 0–1 similarity against the prompt. */
   score: number
+  /**
+   * Speech inside the matched moment, when the engine reports it.
+   *
+   * Marengo searches audio and returns the line that matched; CLIP is
+   * visual-only and never sets this.
+   */
+  text?: string
 }
 
 export type SearchResult = {
@@ -32,6 +42,8 @@ export type SearchResult = {
   minScore?: number
   /** True when the backend rewrote/expanded the prompt into visual variants. */
   expanded?: boolean
+  /** Which index actually answered — echoed back by the server. */
+  engine?: SearchEngine
   /** Set when the backend is configured but could not run the search. */
   error?: string
 }
@@ -42,6 +54,7 @@ type ApiClip = {
   end?: number
   timestamp?: number
   score?: number
+  text?: string | null
 }
 
 export const SUGGESTIONS = [
@@ -109,6 +122,7 @@ export async function searchClips(
   video: VideoRecord,
   prompt: string,
   limit = 9,
+  engine: SearchEngine = 'clip',
 ): Promise<SearchResult> {
   const startedAt = performance.now()
 
@@ -130,13 +144,14 @@ export async function searchClips(
         'Content-Type': 'application/json',
         ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
       },
-      body: JSON.stringify({ video_id: video.id, prompt, limit }),
+      body: JSON.stringify({ video_id: video.id, prompt, limit, engine }),
     })
     if (response.ok) {
       const data = (await response.json()) as {
         items?: ApiClip[]
         min_score?: number
         expanded?: boolean
+        engine?: SearchEngine
       }
       const clips = (data.items ?? []).map((item, index) => {
         const frame = item.timestamp ?? item.start ?? 0
@@ -148,6 +163,7 @@ export async function searchClips(
           end: item.end ?? start + 6,
           frame,
           score: item.score ?? 0,
+          text: item.text ?? undefined,
         }
       })
       return {
@@ -156,6 +172,7 @@ export async function searchClips(
         tookMs: Math.round(performance.now() - startedAt),
         minScore: data.min_score ?? 0,
         expanded: data.expanded ?? false,
+        engine: data.engine ?? engine,
       }
     }
 
@@ -249,6 +266,19 @@ export async function fetchTranscript(videoId: string): Promise<Transcript> {
     error: data.error ?? undefined,
     segments: data.segments ?? [],
   }
+}
+
+/**
+ * Ask the server to index a video with Twelve Labs (Marengo).
+ *
+ * Runs alongside the local CLIP index rather than replacing it, and leaves
+ * frames and transcript untouched. The provider fetches the file from a
+ * presigned storage URL, so no bytes pass through the API.
+ */
+export async function startRemoteIndex(videoId: string): Promise<void> {
+  await apiFetch<unknown>(`/api/v1/videos/${videoId}/remote-index`, {
+    method: 'POST',
+  })
 }
 
 /**

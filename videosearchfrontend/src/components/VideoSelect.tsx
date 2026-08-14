@@ -5,6 +5,26 @@ import { cn } from '../lib/cn'
 import { CheckIcon, ChevronIcon, FilmIcon, PlayIcon, UploadIcon } from './Icons'
 import { compactNumber, humanDuration } from '../lib/format'
 
+/**
+ * What this video is actually searchable by.
+ *
+ * A frame count is only meaningful when the local CLIP index is the one
+ * answering. With it disabled server-side a video has zero frames forever, so
+ * reporting "0 frames indexed" beside a green "Indexed" chip describes
+ * nothing and reads like a failure. Name the index that exists instead.
+ */
+function indexSummary(video: VideoRecord): string {
+  const hasLocal = video.frames > 0
+  const remote = video.remoteIndexStatus
+
+  if (hasLocal && remote === 'ready') return 'visual + speech search'
+  if (hasLocal) return `${compactNumber(video.frames)} frames indexed`
+  if (remote === 'ready') return 'visual + speech search'
+  if (remote === 'processing' || remote === 'pending') return 'indexing…'
+  if (remote === 'failed') return 'indexing failed'
+  return 'not searchable yet'
+}
+
 type Props = {
   videos: VideoRecord[]
   selectedId: string | null
@@ -64,7 +84,7 @@ export function VideoSelect({ videos, selectedId, onSelect, onUpload }: Props) {
           </b>
           <span className="block truncate text-[11.5px] text-ink-faint">
             {selected
-              ? `${humanDuration(selected.duration)} · ${compactNumber(selected.frames)} frames indexed`
+              ? `${humanDuration(selected.duration)} · ${indexSummary(selected)}`
               : videos.length === 0
                 ? 'Nothing indexed yet — upload one to start'
                 : `${videos.length} videos ready`}
@@ -132,7 +152,7 @@ export function VideoSelect({ videos, selectedId, onSelect, onUpload }: Props) {
                     </b>
                     <span className="block truncate text-[11px] text-ink-faint">
                       {humanDuration(video.duration)} ·{' '}
-                      {compactNumber(video.frames)} frames
+                      {indexSummary(video)}
                       {video.status === 'processing' && ' · indexing'}
                     </span>
                   </span>
