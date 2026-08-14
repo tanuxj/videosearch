@@ -60,6 +60,7 @@ Settings are loaded from `.env` (see `.env.example`) via pydantic-settings in
 | `URL_IMPORT_FORMAT` | `b[ext=mp4]/b`                           | yt-dlp format preference (progressive MP4 first) |
 | `URL_IMPORT_ALLOW_PRIVATE` | `false`                         | SSRF guard — set `true` to allow private/local hosts (tests only!) |
 | `URL_IMPORT_MAX_BATCH` | `50`                                  | Most videos one batch import reserves, after playlist/channel expansion |
+| `URL_IMPORT_EXPAND_PLAYLISTS` | `false`                     | Expand a pasted playlist/channel link into its videos (off: such links are rejected) |
 
 ## URL import (paste-a-link)
 
@@ -91,11 +92,15 @@ Users can index videos from pasted links instead of uploading files:
    a manual search.
 
 `POST /api/v1/videos/from-urls` with `{"urls": ["https://…", …]}` imports
-many videos at once. Playlist and channel links are expanded into their
-individual videos (capped at `URL_IMPORT_MAX_BATCH`), duplicates within the
-request are skipped, and every link is validated + probed individually — a
-bad link reports its own error instead of failing the batch. A shared
-`prompt` auto-saves matching clips on every imported video.
+many videos at once. Every link is validated + probed individually — a bad
+link reports its own error instead of failing the batch, and duplicates
+within the request are skipped. A shared `prompt` auto-saves matching clips
+on every imported video.
+
+Playlist/channel expansion is **off by default**: pasting a channel or
+playlist link is rejected with a clear message rather than importing tens of
+videos from one paste. Set `URL_IMPORT_EXPAND_PLAYLISTS=true` to expand such
+links into their individual videos (capped at `URL_IMPORT_MAX_BATCH`).
 
 Caveats: downloading YouTube videos can violate their ToS and some videos
 are throttled/geo-blocked; Zoom recordings usually require login; live

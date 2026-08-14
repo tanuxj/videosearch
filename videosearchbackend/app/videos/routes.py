@@ -295,6 +295,23 @@ async def import_from_urls(
             continue
         except Exception:  # noqa: BLE001 - unreadable → treat as a single video; the probe reports the real error
             entries = [url]
+
+        # Playlist/channel expansion is off by default: importing tens of
+        # videos from one link is too big a job to start from a paste. When
+        # disabled, such links are rejected with a clear message instead of
+        # silently grabbing one arbitrary video from the channel.
+        if not settings.url_import_expand_playlists and len(entries) > 1:
+            items.append(
+                UrlImportItem(
+                    url=raw,
+                    error=(
+                        "Playlist and channel links aren't supported yet — "
+                        "paste individual video links instead."
+                    ),
+                )
+            )
+            continue
+
         for entry in entries:
             # Entries come from an already-validated playlist host, but a
             # playlist could list anything — validate each one like any link.

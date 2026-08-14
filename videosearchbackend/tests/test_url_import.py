@@ -530,7 +530,41 @@ class TestFromUrlsApi:
         assert by_url["https://a.com/good.mp4"]["video"] is not None
         assert len(started) == 1
 
-    def test_from_urls_expands_playlists(self, client, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_from_urls_rejects_playlists_when_disabled(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Expansion is off by default — a channel/playlist link is refused
+        # with a clear message instead of importing its videos.
+        started: list[tuple] = []
+        self._patch_imports(monkeypatch, started)
+
+        def expand(url, max_entries=50):
+            if "playlist" in url:
+                return ["https://a.com/one.mp4", "https://a.com/two.mp4"]
+            return [url]
+
+        monkeypatch.setattr(url_import, "expand_playlist", expand)
+        headers = self._auth_headers(client)
+
+        response = client.post(
+            "/api/v1/videos/from-urls",
+            headers=headers,
+            json={"urls": ["https://a.com/playlist?list=x"]},
+        )
+        body = response.json()
+        assert body["total"] == 0
+        assert body["items"][0]["error"] == (
+            "Playlist and channel links aren't supported yet — paste individual "
+            "video links instead."
+        )
+        assert len(started) == 0
+
+    def test_from_urls_expands_playlists_when_enabled(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.videos import routes
+
+        monkeypatch.setattr(routes.settings, "url_import_expand_playlists", True)
         started: list[tuple] = []
         self._patch_imports(monkeypatch, started)
 

@@ -77,6 +77,49 @@ function framesLabel(n: number): string {
   return `${compactNumber(n)} ${n === 1 ? 'frame' : 'frames'}`
 }
 
+/**
+ * Pull URLs out of arbitrary pasted text.
+ *
+ * Users paste links in every shape — one per line, comma or space separated,
+ * wrapped in quotes or brackets, buried mid-sentence, or even jammed directly
+ * against the next link with no separator at all (“…KaX8https://…LYE…”). The
+ * text is first split on whitespace/commas/semicolons, then each token is cut
+ * at every http(s):// scheme boundary (so back-to-back links split apart) and
+ * at the first character a link can't contain. Only `https://` links are
+ * kept; anything else is reported separately so nothing silently vanishes.
+ */
+function extractUrls(text: string): { https: string[]; http: string[] } {
+  const https: string[] = []
+  const http: string[] = []
+  const seen = new Set<string>()
+  for (const token of text.split(/[\s,;]+/)) {
+    if (!token) continue
+    // Every scheme start in this token. A URL body runs from one start to the
+    // next — that's what splits “…KaX8https://…LYEhttps://…” into three links.
+    const starts = [...token.matchAll(/https?:\/\//gi)].map((m) => m.index!)
+    for (let i = 0; i < starts.length; i += 1) {
+      const from = starts[i]!
+      const to = i + 1 < starts.length ? starts[i + 1]! : token.length
+      const body = token.slice(from, to)
+      // Stop at the first char a link can't contain (whitespace, quotes,
+      // brackets, comma, semicolon), then drop trailing sentence punctuation
+      // like the period on “https://a.com/v1.mp4.” in prose.
+      const cut = body.search(/[\s"'()[\]{}<>,;]/)
+      const raw = (cut === -1 ? body : body.slice(0, cut)).replace(/[.,;:!?]+$/, '')
+      if (!raw) continue
+      if (/^https:\/\//i.test(raw)) {
+        if (!seen.has(raw)) {
+          seen.add(raw)
+          https.push(raw)
+        }
+      } else {
+        http.push(raw)
+      }
+    }
+  }
+  return { https, http }
+}
+
 type Props = {
   open: boolean
   onClose: () => void
@@ -91,6 +134,8 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
 
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
+  /** Non-fatal heads-up (e.g. http:// links skipped for https-only import). */
+  const [note, setNote] = useState('')
   const [video, setVideo] = useState<VideoRecord | null>(null)
   const [progress, setProgress] = useState(0)
   const [stage, setStage] = useState(0)
@@ -128,6 +173,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       setStage(0)
       setDone(false)
       setError('')
+      setNote('')
       setMode('file')
       setUrlInput('')
       setPrompt('')
@@ -347,37 +393,41 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     }
   }
 
-  /** URL mode: validate every link client-side, then let the server import
-   *  them. One link gets the polished single-video progress card; several
-   *  get a list of per-video rows. */
+  /** URL mode: pull the https:// links out of the pasted text and let the
+   *  server import them. One link gets the polished single-video progress
+   *  card; several get a list of per-video rows. */
   async function ingestUrl() {
     if (!user) return
-    const urls = urlInput
-      .split(/\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-    if (urls.length === 0) {
-      setError('Paste at least one link starting with http:// or https://.')
-      return
-    }
-    if (urls.some((line) => !/^https?:\/\//i.test(line))) {
-      setError('Every line must be a full link starting with http:// or https://.')
+    const { https, http } = extractUrls(urlInput)
+    if (https.length === 0) {
+      setError(
+        http.length > 0
+          ? 'Only https:// links are supported — switch these to https:// (http:// isn’t accepted).'
+          : 'Paste at least one link starting with https://.',
+      )
       return
     }
     setError('')
+    // http:// links pasted alongside https:// ones are skipped, not fatal —
+    // but the user should know some of their links didn't make it in.
+    setNote(
+      http.length > 0
+        ? `Skipped ${http.length} ${http.length === 1 ? 'link' : 'links'} — only https:// is supported.`
+        : '',
+    )
     const autoPrompt = prompt.trim()
     try {
-      if (urls.length === 1) {
+      if (https.length === 1) {
         await ingestServer(
           () =>
-            createVideoFromUrl(urls[0]!, {
+            createVideoFromUrl(https[0]!, {
               prompt: autoPrompt || undefined,
               clipLimit: autoPrompt ? 3 : 0,
             }),
           true,
         )
       } else {
-        await ingestBatch(urls, autoPrompt)
+        await ingestBatch(https, autoPrompt)
       }
     } catch (caught) {
       if (!aliveRef.current) return
@@ -439,6 +489,13 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
         {error && (
           <div className="mb-3.5">
             <Alert>{error}</Alert>
+          </div>
+        )}
+        {note && (
+          <div className="mb-3.5">
+            <p className="rounded-lg bg-brand-wash px-3.5 py-2.5 text-[13px] text-brand">
+              {note}
+            </p>
           </div>
         )}
 
@@ -533,9 +590,9 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                 Paste video links
               </h3>
               <p className="mt-2 max-w-[48ch] text-[13.5px] leading-relaxed text-ink-dim">
-                YouTube, Twitch, Zoom, Vimeo, a channel or playlist — or any
-                direct video file URL. One per line; each becomes its own
-                searchable video.
+                YouTube, Twitch, Zoom, Vimeo — or any direct video file URL.
+                Paste them however they come — one per line, comma or space
+                separated — each becomes its own searchable video.
               </p>
               <textarea
                 value={urlInput}
@@ -552,7 +609,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                 rows={3}
                 placeholder={
                   'https://www.youtube.com/watch?v=…\n' +
-                  'https://www.youtube.com/@ChannelName/videos'
+                  'https://vimeo.com/123456789'
                 }
                 aria-label="Video URLs"
                 className="mt-5 w-full resize-none rounded-lg border border-line-strong bg-panel px-3.5 py-2.5 text-left text-[14px] text-ink outline-none placeholder:text-ink-faint focus:border-brand"
@@ -573,8 +630,9 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                 Start importing
               </Button>
               <p className="mt-3 text-[12px] text-ink-faint">
-                Live streams and private recordings can’t be indexed. A channel
-                or playlist imports its latest videos.
+                Only https:// links are imported. Live streams and private
+                recordings can’t be indexed, and channel/playlist links aren’t
+                supported yet — paste individual videos.
               </p>
             </div>
           )}
