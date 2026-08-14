@@ -33,7 +33,7 @@ from starlette.background import BackgroundTask
 from app.auth.deps import CurrentUser, DbSession
 from app.auth.schemas import MessageResponse
 from app.core.config import get_settings
-from app.videos import clips, pipeline, url_import
+from app.videos import clips, pipeline, saved_clips, url_import
 from app.videos import service as videos_service
 from app.videos.schemas import (
     CompleteMultipartIn,
@@ -42,8 +42,12 @@ from app.videos.schemas import (
     PresignMultipartOut,
     PresignUploadIn,
     PresignUploadOut,
+    SavedClipListOut,
     StreamUrlOut,
+    UrlImportBatchIn,
+    UrlImportBatchOut,
     UrlImportIn,
+    UrlImportItem,
     VideoListOut,
     VideoOut,
 )
@@ -218,8 +222,169 @@ async def import_from_url(
     )
     # Fire-and-forget: the response returns immediately with status
     # `processing`; download + indexing run to completion in the background.
-    background_tasks.add_task(url_import.import_video, video.id, url)
+    # A `prompt` makes the job auto-save the best matching scenes as clips.
+    background_tasks.add_task(
+        url_import.import_video,
+        video.id,
+        url,
+        prompt=payload.prompt,
+        clip_limit=payload.clip_limit,
+    )
     return VideoOut.model_validate(video)
+
+
+@router.post(
+    "/from-urls",
+    response_model=UrlImportBatchOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Index videos from several URLs at once",
+    description=(
+        "Like `POST /videos/from-url` but for many links at once: each URL — "
+        "or each video inside a playlist/channel link — becomes its own "
+        "`processing` video and is downloaded + indexed in the background. "
+        "Every link is validated (scheme + SSRF) and probed individually; "
+        "failures are reported per URL instead of failing the whole batch. "
+        "When `prompt` is set, the best matching scenes are auto-saved as "
+        "clips on each successfully imported video."
+    ),
+    responses={
+        409: {"description": "URL import disabled"},
+        422: {"description": "The request is empty or malformed"},
+    },
+)
+async def import_from_urls(
+    user: CurrentUser,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
+    payload: UrlImportBatchIn,
+) -> UrlImportBatchOut:
+    if not settings.url_import_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="URL import is disabled on this server.",
+        )
+
+    # 1. Validate every input link and expand playlist/channel links into
+    #    their individual videos. Failures here become per-URL error items,
+    #    not a failed request — one dead link shouldn't sink the other nine.
+    targets: list[str] = []
+    items: list[UrlImportItem] = []
+    seen: set[str] = set()
+    for raw in payload.urls:
+        try:
+            url = await run_in_threadpool(url_import.validate_url, raw)
+        except url_import.UrlImportError as exc:
+            items.append(UrlImportItem(url=raw, error=str(exc)))
+            continue
+        try:
+            entries = await asyncio.wait_for(
+                run_in_threadpool(
+                    url_import.expand_playlist,
+                    url,
+                    settings.url_import_max_batch,
+                ),
+                timeout=settings.url_import_probe_timeout_seconds,
+            )
+        except TimeoutError:
+            items.append(
+                UrlImportItem(
+                    url=raw,
+                    error="Timed out reading that link — check the URL and try again.",
+                )
+            )
+            continue
+        except Exception:  # noqa: BLE001 - unreadable → treat as a single video; the probe reports the real error
+            entries = [url]
+
+        # Playlist/channel expansion is off by default: importing tens of
+        # videos from one link is too big a job to start from a paste. When
+        # disabled, such links are rejected with a clear message instead of
+        # silently grabbing one arbitrary video from the channel.
+        if not settings.url_import_expand_playlists and len(entries) > 1:
+            items.append(
+                UrlImportItem(
+                    url=raw,
+                    error=(
+                        "Playlist and channel links aren't supported yet — "
+                        "paste individual video links instead."
+                    ),
+                )
+            )
+            continue
+
+        for entry in entries:
+            # Entries come from an already-validated playlist host, but a
+            # playlist could list anything — validate each one like any link.
+            try:
+                entry = await run_in_threadpool(url_import.validate_url, entry)
+            except url_import.UrlImportError as exc:
+                items.append(UrlImportItem(url=entry, error=str(exc)))
+                continue
+            if entry not in seen:
+                seen.add(entry)
+                targets.append(entry)
+            if len(targets) >= settings.url_import_max_batch:
+                break
+        if len(targets) >= settings.url_import_max_batch:
+            break
+
+    # 2. Probe every target concurrently (bounded) so one slow host doesn't
+    #    stall the whole batch; each probe keeps its own timeout.
+    semaphore = asyncio.Semaphore(4)
+
+    async def probe_one(url: str) -> dict:
+        async with semaphore:
+            return await asyncio.wait_for(
+                run_in_threadpool(
+                    url_import.probe_url,
+                    url,
+                    max_bytes=settings.url_import_max_bytes,
+                ),
+                timeout=settings.url_import_probe_timeout_seconds,
+            )
+
+    probed = await asyncio.gather(
+        *(probe_one(url) for url in targets),
+        return_exceptions=True,
+    )
+
+    # 3. Reserve a row per success and enqueue the download + index jobs.
+    for url, outcome in zip(targets, probed, strict=True):
+        if isinstance(outcome, TimeoutError):
+            items.append(
+                UrlImportItem(
+                    url=url,
+                    error="Timed out reading that link — check the URL and try again.",
+                )
+            )
+            continue
+        if isinstance(outcome, Exception):
+            detail = str(outcome)[:300] or "Couldn't read that link as a video."
+            items.append(UrlImportItem(url=url, error=detail))
+            continue
+        try:
+            video = await videos_service.create_url_video(
+                db,
+                owner_id=user.id,
+                title=outcome["title"],
+                ext=outcome["ext"],
+            )
+        except Exception as exc:  # pragma: no cover - local reservation, nothing network-bound
+            items.append(UrlImportItem(url=url, error=f"Could not start the import: {exc}"))
+            continue
+        background_tasks.add_task(
+            url_import.import_video,
+            video.id,
+            url,
+            prompt=payload.prompt,
+            clip_limit=payload.clip_limit,
+        )
+        items.append(UrlImportItem(url=url, video=VideoOut.model_validate(video)))
+
+    return UrlImportBatchOut(
+        items=items,
+        total=sum(1 for item in items if item.video is not None),
+    )
 
 
 @router.post(
@@ -669,6 +834,58 @@ async def download_clip(
         # missing imageio-ffmpeg, an OSError) must not leak the temp files.
         _cleanup_clip_files(source, temp_dir)
         raise
+
+
+@router.get(
+    "/{video_id}/clips",
+    response_model=SavedClipListOut,
+    summary="List a video's saved clips",
+    description=(
+        "Scenes the user asked to keep — auto-extracted from a URL import "
+        "that carried a prompt, or added later. Oldest first; each clip has "
+        "its own start/end/frame/score so the library can render thumbnails "
+        "and play it back like a search result."
+    ),
+    responses={404: {"description": "Video not found"}},
+)
+async def list_saved_clips(
+    user: CurrentUser,
+    db: DbSession,
+    video_id: uuid.UUID,
+) -> SavedClipListOut:
+    try:
+        await videos_service.get_video(db, user.id, video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+
+    items = await saved_clips.list_clips(db, user.id, video_id)
+    return SavedClipListOut(items=items, count=len(items))
+
+
+@router.delete(
+    "/{video_id}/clips/{clip_id}",
+    response_model=MessageResponse,
+    summary="Delete one saved clip",
+    description="Removes a single auto-extracted scene (ownership enforced).",
+    responses={404: {"description": "Video or clip not found"}},
+)
+async def delete_saved_clip(
+    user: CurrentUser,
+    db: DbSession,
+    video_id: uuid.UUID,
+    clip_id: uuid.UUID,
+) -> MessageResponse:
+    # The video must exist and belong to the user before touching its clips —
+    # otherwise the clip id alone could reveal another user's data.
+    try:
+        await videos_service.get_video(db, user.id, video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+    try:
+        await saved_clips.delete_clip(db, user.id, clip_id)
+    except saved_clips.SavedClipNotFound as exc:
+        raise HTTPException(status_code=404, detail="Clip not found") from exc
+    return MessageResponse(detail="Clip deleted")
 
 
 @router.delete(

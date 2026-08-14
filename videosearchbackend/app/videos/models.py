@@ -1,4 +1,4 @@
-"""Video library and frame index tables.
+"""Video library, frame index and saved-clip tables.
 
 * ``videos`` — one row per uploaded video, owned by a user. `status` tracks
   the indexing pipeline (`processing` → `ready`, or `failed` with an error
@@ -8,6 +8,9 @@
 * ``frames`` — one row per indexed frame, holding the CLIP image embedding
   (512 dims for clip-ViT-B-32) and the timestamp it came from. Search is a
   cosine-similarity query over `embedding`, accelerated by the HNSW index.
+* ``saved_clips`` — scenes the user asked to keep: auto-extracted from a
+  URL import that carried a prompt (see ``url_import.py``), stored as
+  start/end/frame/score so the library can show them without a search.
 """
 
 import uuid
@@ -88,6 +91,52 @@ class Video(Base, TimestampMixin):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Video {self.name} status={self.status}>"
+
+
+class SavedClip(Base, TimestampMixin):
+    """A scene kept from an import, auto-extracted at index time.
+
+    ``saved_clips`` — one row per kept scene. Created when a URL import carries
+    a prompt: after indexing finishes, the import job runs the same CLIP search
+    the search page uses and persists the best scenes, so the library can show
+    them without a manual search. `frame` is the timestamp of the strongest
+    matching frame (used for thumbnails), `score` its cosine similarity, and
+    `start`/`end` span the padded scene exactly like a search result. Deleting
+    a video cascades here.
+    """
+
+    __tablename__ = "saved_clips"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("videos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # The prompt the scene was extracted for (same cap as search prompts).
+    prompt: Mapped[str] = mapped_column(String(300), nullable=False)
+    start: Mapped[float] = mapped_column(Float, nullable=False)
+    # Quoted in DDL: `end` is a reserved word in PostgreSQL.
+    end: Mapped[float] = mapped_column(Float, nullable=False)
+    # Timestamp of the strongest matching frame — what thumbnails seek to.
+    frame: Mapped[float] = mapped_column(Float, nullable=False)
+    # Cosine similarity (0–1) of the strongest frame against the prompt.
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<SavedClip video={self.video_id} t={self.frame} score={self.score:.2f}>"
 
 
 class Frame(Base):

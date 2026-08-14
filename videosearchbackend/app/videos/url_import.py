@@ -1,14 +1,16 @@
 """URL import: index a video from a pasted link.
 
-Flow behind ``POST /videos/from-url``:
+Flow behind ``POST /videos/from-url`` and ``POST /videos/from-urls``:
 
     validate_url()     scheme + SSRF guard (private hosts refused)
+    expand_playlist()  resolve a playlist/channel link into its videos
     probe_url()        yt-dlp extract_info(download=False) → title, ext,
                        duration, size; falls back to a plain HTTP probe for
                        direct file links
     create_url_video() reserves a `processing` row with the right key ext
     import_video()     background task: download → save to storage → run the
-                       normal indexing pipeline
+                       normal indexing pipeline → (optional) auto-save the
+                       best scenes matching the import's prompt as clips
 
 Download strategy:
 
@@ -41,8 +43,9 @@ from pathlib import Path
 
 from app.core.config import get_settings
 from app.db.session import SessionFactory
-from app.videos import pipeline, service
+from app.videos import pipeline, search, service
 from app.videos.models import Video
+from app.videos.saved_clips import save_clips
 from app.videos.storage import storage
 
 logger = logging.getLogger(__name__)
@@ -236,6 +239,46 @@ def _ext_from_url(url: str) -> str:
     return ext if ext else "mp4"
 
 
+def expand_playlist(url: str, max_entries: int = 50) -> list[str]:
+    """Resolve a playlist/channel link into its individual video URLs.
+
+    Uses yt-dlp's flat extraction (metadata only, no media downloaded), so a
+    channel or playlist URL turns into the list of videos inside it — capped
+    at `max_entries` to keep huge channels bounded. Anything else (a plain
+    video link, a direct file URL, or a link yt-dlp can't expand) returns
+    ``[url]``: the caller then treats it as a single video, and the normal
+    probe reports any real error. Never raises.
+    """
+    import yt_dlp
+
+    try:
+        with yt_dlp.YoutubeDL(
+            {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": False,
+                "extract_flat": True,
+                "playlistend": max(1, max_entries),
+                "skip_download": True,
+            }
+        ) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception:  # noqa: BLE001 - unreadable link → treat as a single video
+        return [url]
+
+    if info is None or info.get("_type") != "playlist":
+        return [url]
+    entries = [entry for entry in (info.get("entries") or []) if entry]
+    if not entries:
+        return [url]
+    urls = []
+    for entry in entries:
+        candidate = str(entry.get("webpage_url") or entry.get("url") or url)
+        if candidate.startswith(("http://", "https://")):
+            urls.append(candidate)
+    return urls[: max(1, max_entries)] or [url]
+
+
 # ── Download ─────────────────────────────────────────────────
 
 
@@ -358,13 +401,21 @@ def _download_direct(url: str, dest_dir: Path, *, max_bytes: int) -> tuple[Path,
 # ── Background import task ───────────────────────────────────
 
 
-async def import_video(video_id: uuid.UUID, url: str) -> None:
+async def import_video(
+    video_id: uuid.UUID,
+    url: str,
+    *,
+    prompt: str | None = None,
+    clip_limit: int = 0,
+) -> None:
     """Download a pasted URL, store it, then run the normal pipeline.
 
     Mirrors the upload flow: the file lands in the same storage the video row
     already points at, then ``pipeline.index_video`` extracts and embeds
-    frames. Any failure before indexing marks the video ``failed`` with a
-    readable message instead of leaving it stuck in ``processing``.
+    frames. When `prompt` is set (and `clip_limit` > 0), the best matching
+    scenes are auto-saved as clips once indexing finishes. Any failure before
+    indexing marks the video ``failed`` with a readable message instead of
+    leaving it stuck in ``processing``.
     """
     path: Path | None = None
     tmp_dir: Path | None = None
@@ -373,6 +424,8 @@ async def import_video(video_id: uuid.UUID, url: str) -> None:
         # `source_path` transfers ownership: the pipeline deletes it when
         # done (or fails), exactly like a staged upload.
         await pipeline.index_video(video_id, source_path=path)
+        if prompt and clip_limit > 0:
+            await _autoextract_clips(video_id, prompt, clip_limit)
     except Exception as exc:  # noqa: BLE001 - any failure must be recorded
         logger.exception("URL import failed for video %s", video_id)
         if path is not None:
@@ -381,6 +434,41 @@ async def import_video(video_id: uuid.UUID, url: str) -> None:
     finally:
         if tmp_dir is not None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def _autoextract_clips(video_id: uuid.UUID, prompt: str, limit: int) -> None:
+    """Run a search on the freshly indexed video and keep the best scenes.
+
+    Uses the exact same ranking as the search page (``run_clip_search``), so
+    an auto-saved clip is what a manual search would have surfaced. Best-
+    effort: any failure here — an LLM hiccup, an embedding error — must not
+    fail the import; the video itself indexed fine and stays searchable.
+    """
+    try:
+        async with SessionFactory() as db:
+            video = await db.get(Video, video_id)
+            if video is None or video.status != "ready":
+                return
+            result = await search.run_clip_search(
+                db,
+                video_id,
+                prompt,
+                limit=limit,
+                duration_seconds=video.duration_seconds,
+            )
+            if not result.items:
+                logger.info("Auto-extract found no scene matching %r on video %s", prompt, video_id)
+                return
+            saved = await save_clips(
+                db,
+                owner_id=video.owner_id,
+                video_id=video_id,
+                prompt=prompt,
+                clips=[item.model_dump() for item in result.items],
+            )
+            logger.info("Auto-extracted %d clips for video %s", len(saved), video_id)
+    except Exception:  # noqa: BLE001 - best effort; the video stays indexed
+        logger.exception("Auto-extract failed for video %s — the video stays indexed", video_id)
 
 
 async def _download_and_store(video_id: uuid.UUID, url: str) -> tuple[Path, Path]:

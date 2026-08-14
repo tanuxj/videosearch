@@ -5,6 +5,7 @@ import { removeVideo, sourceFor, useVideos } from '../lib/store'
 import { API_ENABLED } from '../lib/http'
 import { AppShell } from '../components/Shell'
 import { UploadDialog } from '../components/UploadDialog'
+import { SavedClips } from '../components/SavedClips'
 import { Button } from '../components/ui/Button'
 import {
   Chip,
@@ -131,8 +132,9 @@ export default function Dashboard() {
                 {videos.map((video) => (
                   <li
                     key={video.id}
-                    className="group flex flex-wrap items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-soft sm:px-5"
+                    className="transition-colors hover:bg-surface-soft"
                   >
+                    <div className="group flex flex-wrap items-center gap-3 px-4 py-3 sm:px-5">
                     <span className="grid size-14 shrink-0 place-items-center overflow-hidden rounded-xl border border-line bg-surface-sunk text-brand [&_svg]:size-5">
                       {video.poster ? (
                         <img
@@ -204,6 +206,10 @@ export default function Dashboard() {
                         <TrashIcon />
                       </Button>
                     </div>
+                    </div>
+                    {/* Auto-extracted scenes — only renders when this video
+                        has saved clips. */}
+                    <SavedClips video={video} />
                   </li>
                 ))}
               </ul>

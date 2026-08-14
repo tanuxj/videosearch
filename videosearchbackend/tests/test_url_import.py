@@ -215,6 +215,81 @@ def test_download_enforces_size_cap(
     assert list(tmp_path.iterdir()) == []
 
 
+# ── expand_playlist ───────────────────────────────────────────
+
+
+class _FakeYtDlp:
+    """Stands in for yt_dlp.YoutubeDL with a canned `extract_info` result."""
+
+    def __init__(self, info=None, *, raises: Exception | None = None) -> None:
+        self._info = info
+        self._raises = raises
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args) -> None:
+        return None
+
+    def extract_info(self, url, download=False):
+        if self._raises is not None:
+            raise self._raises
+        return self._info
+
+
+def _stub_ytdlp(monkeypatch: pytest.MonkeyPatch, fake: _FakeYtDlp) -> None:
+    import yt_dlp
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", lambda opts: fake)
+
+
+def test_expand_playlist_returns_entry_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_ytdlp(
+        monkeypatch,
+        _FakeYtDlp(
+            {
+                "_type": "playlist",
+                "entries": [
+                    {"webpage_url": "https://youtube.com/watch?v=one"},
+                    {"webpage_url": "https://youtube.com/watch?v=two"},
+                ],
+            }
+        ),
+    )
+    assert url_import.expand_playlist("https://youtube.com/playlist?list=x") == [
+        "https://youtube.com/watch?v=one",
+        "https://youtube.com/watch?v=two",
+    ]
+
+
+def test_expand_playlist_caps_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_ytdlp(
+        monkeypatch,
+        _FakeYtDlp(
+            {
+                "_type": "playlist",
+                "entries": [{"webpage_url": f"https://youtube.com/watch?v={i}"} for i in range(10)],
+            }
+        ),
+    )
+    assert len(url_import.expand_playlist("https://youtube.com/playlist?list=x", 3)) == 3
+
+
+def test_expand_playlist_single_video_returns_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_ytdlp(
+        monkeypatch,
+        _FakeYtDlp({"_type": "video", "webpage_url": "https://youtube.com/watch?v=x"}),
+    )
+    assert url_import.expand_playlist("https://youtube.com/watch?v=x") == [
+        "https://youtube.com/watch?v=x"
+    ]
+
+
+def test_expand_playlist_failure_falls_back_to_single(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_ytdlp(monkeypatch, _FakeYtDlp(raises=RuntimeError("boom")))
+    assert url_import.expand_playlist("https://example.com/v.mp4") == ["https://example.com/v.mp4"]
+
+
 # ── API route (needs a database) ───────────────────────────────
 
 from tests.conftest import needs_db  # noqa: E402
@@ -279,7 +354,9 @@ class TestFromUrlApi:
         monkeypatch.setattr(
             url_import,
             "import_video",
-            lambda video_id, url: started.append((video_id, url)),
+            lambda video_id, url, *, prompt=None, clip_limit=0: started.append(
+                (video_id, url, prompt, clip_limit)
+            ),
         )
 
         headers = self._auth_headers(client)
@@ -296,13 +373,53 @@ class TestFromUrlApi:
         assert "storage_key" not in body
 
         # The row is listed like any other video, and the background import
-        # job was handed (video_id, url) — TestClient flushes background
-        # tasks after the response.
+        # job was handed (video_id, url) with no auto-extract prompt —
+        # TestClient flushes background tasks after the response.
         listing = client.get("/api/v1/videos", headers=headers).json()
         assert [item["id"] for item in listing["items"]] == [body["id"]]
-        assert [(str(v), u) for v, u in started] == [
-            (body["id"], "https://example.com/big-buck-bunny.mp4")
+        assert [(str(v), u, p, c) for v, u, p, c in started] == [
+            (body["id"], "https://example.com/big-buck-bunny.mp4", None, 0)
         ]
+
+    def test_from_url_forwards_prompt_to_autoextract(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.videos import url_import
+
+        monkeypatch.setattr(url_import, "validate_url", lambda raw: raw.strip())
+        monkeypatch.setattr(
+            url_import,
+            "probe_url",
+            lambda url, *, max_bytes: {
+                "title": "Car chase",
+                "ext": "mp4",
+                "duration": 60,
+                "size": 1234,
+            },
+        )
+        started: list[tuple] = []
+        monkeypatch.setattr(
+            url_import,
+            "import_video",
+            lambda video_id, url, *, prompt=None, clip_limit=0: started.append(
+                (video_id, prompt, clip_limit)
+            ),
+        )
+
+        headers = self._auth_headers(client)
+        response = client.post(
+            "/api/v1/videos/from-url",
+            headers=headers,
+            json={
+                "url": "https://example.com/chase.mp4",
+                "prompt": "a red car driving on a highway",
+                "clip_limit": 5,
+            },
+        )
+        assert response.status_code == 201, response.text
+        video_id, prompt, clip_limit = started[0]
+        assert prompt == "a red car driving on a highway"
+        assert clip_limit == 5
 
     def test_from_url_409_when_disabled(self, client, monkeypatch: pytest.MonkeyPatch) -> None:
         from app.videos import routes
@@ -316,3 +433,214 @@ class TestFromUrlApi:
         )
         assert response.status_code == 409
         assert "disabled" in response.json()["detail"]
+
+
+class TestFromUrlsApi:
+    """Batch-import route tests — skipped unless a test database is configured."""
+
+    pytestmark = needs_db
+
+    @staticmethod
+    def _auth_headers(client) -> dict[str, str]:
+        response = client.post("/api/v1/auth/signup", json=SIGNUP)
+        assert response.status_code == 201, response.text
+        return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    @staticmethod
+    def _patch_imports(monkeypatch: pytest.MonkeyPatch, started: list) -> None:
+        """Fake the network: validation passes, playlists stay single, probe is
+        instant, and the background job is captured instead of run."""
+        monkeypatch.setattr(url_import, "validate_url", lambda raw: raw.strip())
+        monkeypatch.setattr(url_import, "expand_playlist", lambda url, max_entries=50: [url])
+        monkeypatch.setattr(
+            url_import,
+            "probe_url",
+            lambda url, *, max_bytes: {
+                "title": f"Video {url.rsplit('/', 1)[-1]}",
+                "ext": "mp4",
+                "duration": 60,
+                "size": 1,
+            },
+        )
+        monkeypatch.setattr(
+            url_import,
+            "import_video",
+            lambda video_id, url, *, prompt=None, clip_limit=0: started.append(
+                (video_id, url, prompt, clip_limit)
+            ),
+        )
+
+    def test_from_urls_requires_auth(self, client) -> None:
+        response = client.post(
+            "/api/v1/videos/from-urls",
+            json={"urls": ["https://example.com/v.mp4"]},
+        )
+        assert response.status_code == 401
+
+    def test_from_urls_imports_each_url(self, client, monkeypatch: pytest.MonkeyPatch) -> None:
+        started: list[tuple] = []
+        self._patch_imports(monkeypatch, started)
+        headers = self._auth_headers(client)
+
+        response = client.post(
+            "/api/v1/videos/from-urls",
+            headers=headers,
+            json={"urls": ["https://a.com/one.mp4", "https://b.com/two.mp4"]},
+        )
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["total"] == 2
+        assert all(item["video"] is not None for item in body["items"])
+        assert {item["video"]["status"] for item in body["items"]} == {"processing"}
+        # Each URL got its own background import job.
+        assert sorted(u for _, u, _, _ in started) == [
+            "https://a.com/one.mp4",
+            "https://b.com/two.mp4",
+        ]
+
+    def test_from_urls_reports_per_url_failures(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        started: list[tuple] = []
+        self._patch_imports(monkeypatch, started)
+
+        def probe(url, *, max_bytes):
+            if "bad" in url:
+                raise url_import.UrlImportError("That link didn't resolve to a video.")
+            return {
+                "title": "Good",
+                "ext": "mp4",
+                "duration": 60,
+                "size": 1,
+            }
+
+        monkeypatch.setattr(url_import, "probe_url", probe)
+        headers = self._auth_headers(client)
+
+        response = client.post(
+            "/api/v1/videos/from-urls",
+            headers=headers,
+            json={"urls": ["https://a.com/good.mp4", "https://a.com/bad.mp4"]},
+        )
+        body = response.json()
+        assert body["total"] == 1
+        by_url = {item["url"]: item for item in body["items"]}
+        assert by_url["https://a.com/bad.mp4"]["error"] == ("That link didn't resolve to a video.")
+        assert by_url["https://a.com/bad.mp4"]["video"] is None
+        assert by_url["https://a.com/good.mp4"]["video"] is not None
+        assert len(started) == 1
+
+    def test_from_urls_rejects_playlists_when_disabled(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Expansion is off by default — a channel/playlist link is refused
+        # with a clear message instead of importing its videos.
+        started: list[tuple] = []
+        self._patch_imports(monkeypatch, started)
+
+        def expand(url, max_entries=50):
+            if "playlist" in url:
+                return ["https://a.com/one.mp4", "https://a.com/two.mp4"]
+            return [url]
+
+        monkeypatch.setattr(url_import, "expand_playlist", expand)
+        headers = self._auth_headers(client)
+
+        response = client.post(
+            "/api/v1/videos/from-urls",
+            headers=headers,
+            json={"urls": ["https://a.com/playlist?list=x"]},
+        )
+        body = response.json()
+        assert body["total"] == 0
+        assert body["items"][0]["error"] == (
+            "Playlist and channel links aren't supported yet — paste individual "
+            "video links instead."
+        )
+        assert len(started) == 0
+
+    def test_from_urls_expands_playlists_when_enabled(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.videos import routes
+
+        monkeypatch.setattr(routes.settings, "url_import_expand_playlists", True)
+        started: list[tuple] = []
+        self._patch_imports(monkeypatch, started)
+
+        def expand(url, max_entries=50):
+            if "playlist" in url:
+                return ["https://a.com/one.mp4", "https://a.com/two.mp4"]
+            return [url]
+
+        monkeypatch.setattr(url_import, "expand_playlist", expand)
+        headers = self._auth_headers(client)
+
+        response = client.post(
+            "/api/v1/videos/from-urls",
+            headers=headers,
+            json={"urls": ["https://a.com/playlist?list=x"]},
+        )
+        body = response.json()
+        assert body["total"] == 2
+        assert sorted(item["url"] for item in body["items"]) == [
+            "https://a.com/one.mp4",
+            "https://a.com/two.mp4",
+        ]
+        assert len(started) == 2
+
+    def test_from_urls_dedupes_repeated_urls(self, client, monkeypatch: pytest.MonkeyPatch) -> None:
+        started: list[tuple] = []
+        self._patch_imports(monkeypatch, started)
+        headers = self._auth_headers(client)
+
+        response = client.post(
+            "/api/v1/videos/from-urls",
+            headers=headers,
+            json={"urls": ["https://a.com/one.mp4", "https://a.com/one.mp4"]},
+        )
+        body = response.json()
+        assert body["total"] == 1
+        assert len(started) == 1
+
+    def test_from_urls_respects_batch_cap(self, client, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.videos import routes
+
+        monkeypatch.setattr(routes.settings, "url_import_max_batch", 2)
+        started: list[tuple] = []
+        self._patch_imports(monkeypatch, started)
+        headers = self._auth_headers(client)
+
+        response = client.post(
+            "/api/v1/videos/from-urls",
+            headers=headers,
+            json={
+                "urls": [
+                    "https://a.com/one.mp4",
+                    "https://a.com/two.mp4",
+                    "https://a.com/three.mp4",
+                ]
+            },
+        )
+        body = response.json()
+        assert body["total"] == 2
+        assert len(started) == 2
+
+    def test_from_urls_passes_prompt_through(self, client, monkeypatch: pytest.MonkeyPatch) -> None:
+        started: list[tuple] = []
+        self._patch_imports(monkeypatch, started)
+        headers = self._auth_headers(client)
+
+        response = client.post(
+            "/api/v1/videos/from-urls",
+            headers=headers,
+            json={
+                "urls": ["https://a.com/one.mp4"],
+                "prompt": "a red car driving on a highway",
+                "clip_limit": 5,
+            },
+        )
+        assert response.status_code == 201, response.text
+        _, _, prompt, clip_limit = started[0]
+        assert prompt == "a red car driving on a highway"
+        assert clip_limit == 5

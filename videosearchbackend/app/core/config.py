@@ -181,6 +181,15 @@ class Settings(BaseSettings):
     # services. Tests flip this on so they can point imports at a local
     # fixture server.
     url_import_allow_private: bool = False
+    # Most videos a single `POST /videos/from-urls` request will reserve,
+    # after playlist/channel expansion. A channel with hundreds of uploads
+    # imports its newest N rather than everything.
+    url_import_max_batch: int = Field(default=50, ge=1, le=500)
+    # Whether a pasted playlist/channel link expands into its individual
+    # videos. Off by default: importing dozens of videos from one link is too
+    # big a job to start from a paste, so such links are rejected with a
+    # clear message instead. Flip on to re-enable expansion.
+    url_import_expand_playlists: bool = False
 
     # ── Postgres database (spawned by docker-compose) ────────────
     # The compose stack passes these to the container; when running the

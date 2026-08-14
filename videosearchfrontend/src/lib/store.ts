@@ -3,6 +3,16 @@ import type { Clip } from './api'
 import { API_ENABLED, ApiError, apiFetch, getAccessToken, url } from './http'
 
 /**
+ * A scene kept from an import: auto-extracted from a prompt after indexing,
+ * so the library can show highlights without a manual search. Same shape as
+ * a search-result clip, plus the prompt it was extracted for.
+ */
+export type SavedClip = Clip & {
+  prompt: string
+  createdAt: string
+}
+
+/**
  * Video library.
  *
  * Two backends behind one interface:
@@ -364,13 +374,99 @@ async function readError(response: Response, fallback: string): Promise<string> 
  * The backend validates the URL (scheme + SSRF guard), reserves a
  * `processing` row, and downloads + indexes the video in the background —
  * exactly like an upload, so the same status-polling progress UI applies.
+ * When `opts.prompt` is set, the best matching scenes are auto-saved as
+ * clips once indexing finishes.
  */
-export async function createVideoFromUrl(sourceUrl: string): Promise<VideoRecord> {
+export async function createVideoFromUrl(
+  sourceUrl: string,
+  opts: { prompt?: string; clipLimit?: number } = {},
+): Promise<VideoRecord> {
   const data = await apiFetch<ApiVideo>('/api/v1/videos/from-url', {
     method: 'POST',
-    body: JSON.stringify({ url: sourceUrl }),
+    body: JSON.stringify({
+      url: sourceUrl,
+      prompt: opts.prompt ?? null,
+      clip_limit: opts.clipLimit ?? 3,
+    }),
   })
   return toRecord(data)
+}
+
+/**
+ * One resolved target of a batch import: either the reserved video or the
+ * reason that link was skipped — never both.
+ */
+export type UrlImportResult = {
+  url: string
+  video?: VideoRecord
+  error?: string
+}
+
+type ApiUrlImportItem = {
+  url: string
+  video: ApiVideo | null
+  error: string | null
+}
+
+/**
+ * Import many links at once. Playlist/channel links expand into their
+ * individual videos server-side; every URL is validated and probed
+ * individually, so failures come back per-URL rather than failing the whole
+ * batch. `opts.prompt` auto-saves the best matching scenes on each video.
+ */
+export async function createVideosFromUrls(
+  urls: string[],
+  opts: { prompt?: string; clipLimit?: number } = {},
+): Promise<UrlImportResult[]> {
+  const data = await apiFetch<{ items: ApiUrlImportItem[] }>('/api/v1/videos/from-urls', {
+    method: 'POST',
+    body: JSON.stringify({
+      urls,
+      prompt: opts.prompt ?? null,
+      clip_limit: opts.clipLimit ?? 3,
+    }),
+  })
+  return data.items.map((item) => ({
+    url: item.url,
+    ...(item.video ? { video: toRecord(item.video) } : {}),
+    ...(item.error ? { error: item.error } : {}),
+  }))
+}
+
+/* ── Saved clips (auto-extracted scenes) ─────────────────── */
+
+type ApiSavedClip = {
+  id: string
+  prompt: string
+  start: number
+  end: number
+  frame: number
+  score: number
+  created_at: string
+}
+
+/** A video's auto-extracted clips, oldest first. Empty in demo mode. */
+export async function listVideoClips(videoId: string): Promise<SavedClip[]> {
+  if (!API_ENABLED) return []
+  const data = await apiFetch<{ items: ApiSavedClip[] }>(
+    `/api/v1/videos/${videoId}/clips`,
+  )
+  return data.items.map((clip) => ({
+    id: clip.id,
+    videoId,
+    start: clip.start,
+    end: clip.end,
+    frame: clip.frame,
+    score: clip.score,
+    prompt: clip.prompt,
+    createdAt: clip.created_at,
+  }))
+}
+
+/** Delete one auto-extracted clip. */
+export async function removeVideoClip(videoId: string, clipId: string): Promise<void> {
+  if (!API_ENABLED) return
+  await apiFetch(`/api/v1/videos/${videoId}/clips/${clipId}`, { method: 'DELETE' })
 }
 
 export async function removeVideo(userId: string, videoId: string): Promise<void> {

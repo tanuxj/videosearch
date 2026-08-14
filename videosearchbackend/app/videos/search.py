@@ -30,11 +30,13 @@ Search-quality guarantees (what makes this not "the least-bad random frame"):
 """
 
 import uuid
+from dataclasses import dataclass
 
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import CurrentUser, DbSession
 from app.core.config import get_settings
@@ -70,6 +72,87 @@ class ClipSearchResponse(BaseModel):
     min_score: float
     expanded: bool
     items: list[ClipItem]
+
+
+@dataclass
+class ClipSearchResult:
+    """What a search found: ranked scenes plus the threshold that filtered them."""
+
+    items: list[ClipItem]
+    min_score: float
+    expanded: bool
+
+
+async def run_clip_search(
+    db: AsyncSession,
+    video_id: uuid.UUID,
+    prompt: str,
+    *,
+    limit: int,
+    duration_seconds: float | None,
+) -> ClipSearchResult:
+    """Embed `prompt` (plus LLM-expanded variants) and rank the video's scenes.
+
+    Shared by the search route and the URL-import auto-extract job so both
+    rank identically: per-frame best similarity across query variants, scenes
+    merged within ``search_merge_window_seconds``, only frames above
+    ``search_min_similarity`` kept, results best-first and capped at `limit`.
+    `duration_seconds` clamps clip end times to the video's real length.
+    """
+    # The "middleman": rewrite a terse/broken prompt into visual descriptions
+    # CLIP can actually match. Runs on a worker thread — an LLM round trip is
+    # network I/O, and the CLIP model is CPU-bound, so neither blocks the loop.
+    variants = await run_in_threadpool(query_expand.expand_prompt, prompt)
+    expanded = variants != [prompt]
+
+    min_score = settings.search_min_similarity
+    merge_window = settings.search_merge_window_seconds
+
+    # Per-frame best similarity across all query variants: an expanded variant
+    # that names the exact object in a shot should win over the raw prompt.
+    # The whole video is scanned (ordered by timestamp later) so the threshold
+    # is a true "nothing matched" test and every contiguous run merges into a
+    # scene. One video is a few thousand rows at most; the HNSW ANN index
+    # would silently drop frames (and with them, whole scenes) under the cap.
+    best: dict[uuid.UUID, tuple[float, float, str]] = {}
+    for variant in variants:
+        # The text embedding is a ~600 MB model on CPU — never block the loop.
+        query_vector = await run_in_threadpool(embedder.embed_text, variant)
+        distance = Frame.embedding.cosine_distance(query_vector)
+        result = await db.execute(
+            select(Frame.id, Frame.timestamp_sec, (1 - distance).label("score")).where(
+                Frame.video_id == video_id
+            )
+        )
+        for row in result.all():
+            score = float(row.score)
+            current = best.get(row.id)
+            if current is None or score > current[1]:
+                best[row.id] = (row.timestamp_sec, score, str(row.id))
+
+    frames = sorted(best.values(), key=lambda frame: frame[0])
+    scenes = _merge_scenes(frames, min_score, merge_window)
+
+    items = []
+    for scene in scenes:
+        first_ts = scene[0][0]
+        last_ts = scene[-1][0]
+        best_ts, best_score, best_id = max(scene, key=lambda frame: frame[1])
+        end = last_ts + _CLIP_PAD
+        if duration_seconds:
+            end = min(end, duration_seconds)
+        items.append(
+            ClipItem(
+                id=best_id,
+                start=max(0.0, round(first_ts - _CLIP_PAD, 2)),
+                end=round(end, 2),
+                timestamp=round(best_ts, 2),
+                score=round(best_score, 4),
+            )
+        )
+
+    items.sort(key=lambda item: item.score, reverse=True)
+    return ClipSearchResult(items=items[:limit], min_score=min_score, expanded=expanded)
 
 
 def _merge_scenes(frames, min_score: float, merge_window: float) -> list[list]:
@@ -129,65 +212,17 @@ async def search_clips(
             detail="Video is still being indexed",
         )
 
-    # The "middleman": rewrite a terse/broken prompt into visual descriptions
-    # CLIP can actually match. Runs on a worker thread — an LLM round trip is
-    # network I/O, and the CLIP model is CPU-bound, so neither blocks the loop.
-    variants = await run_in_threadpool(query_expand.expand_prompt, payload.prompt)
-    expanded = variants != [payload.prompt]
-
-    min_score = settings.search_min_similarity
-    merge_window = settings.search_merge_window_seconds
-
-    # Per-frame best similarity across all query variants: an expanded variant
-    # that names the exact object in a shot should win over the raw prompt.
-    # The whole video is scanned (ordered by timestamp later) so the threshold
-    # is a true "nothing matched" test and every contiguous run merges into a
-    # scene. One video is a few thousand rows at most; the HNSW ANN index
-    # would silently drop frames (and with them, whole scenes) under the cap.
-    best: dict[uuid.UUID, tuple[float, float, str]] = {}
-    for variant in variants:
-        # The text embedding is a ~600 MB model on CPU — never block the loop.
-        query_vector = await run_in_threadpool(embedder.embed_text, variant)
-        distance = Frame.embedding.cosine_distance(query_vector)
-        result = await db.execute(
-            select(Frame.id, Frame.timestamp_sec, (1 - distance).label("score")).where(
-                Frame.video_id == payload.video_id
-            )
-        )
-        for row in result.all():
-            score = float(row.score)
-            current = best.get(row.id)
-            if current is None or score > current[1]:
-                best[row.id] = (row.timestamp_sec, score, str(row.id))
-
-    frames = sorted(best.values(), key=lambda frame: frame[0])
-    scenes = _merge_scenes(frames, min_score, merge_window)
-
-    duration = video.duration_seconds
-    items = []
-    for scene in scenes:
-        first_ts = scene[0][0]
-        last_ts = scene[-1][0]
-        best_ts, best_score, best_id = max(scene, key=lambda frame: frame[1])
-        end = last_ts + _CLIP_PAD
-        if duration:
-            end = min(end, duration)
-        items.append(
-            ClipItem(
-                id=best_id,
-                start=max(0.0, round(first_ts - _CLIP_PAD, 2)),
-                end=round(end, 2),
-                timestamp=round(best_ts, 2),
-                score=round(best_score, 4),
-            )
-        )
-
-    items.sort(key=lambda item: item.score, reverse=True)
-    items = items[: payload.limit]
+    result = await run_clip_search(
+        db,
+        payload.video_id,
+        payload.prompt,
+        limit=payload.limit,
+        duration_seconds=video.duration_seconds,
+    )
     return ClipSearchResponse(
         query=payload.prompt,
-        count=len(items),
-        min_score=round(min_score, 4),
-        expanded=expanded,
-        items=items,
+        count=len(result.items),
+        min_score=round(result.min_score, 4),
+        expanded=result.expanded,
+        items=result.items,
     )
