@@ -19,6 +19,12 @@ class VideoOut(BaseModel):
     error: str | None = None
     frames_total: int
     frames_indexed: int
+    # Transcription's own lifecycle — `pending` | `processing` | `ready` |
+    # `failed` | `skipped`. Reaches `ready` well before `status` does, which is
+    # how the client knows it can show subtitles mid-index.
+    transcript_status: str
+    # Detected spoken language (ISO-639-1 where recognised), once known.
+    language: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -129,6 +135,34 @@ class SavedClipOut(BaseModel):
 class SavedClipListOut(BaseModel):
     items: list[SavedClipOut]
     count: int = Field(description="Number of saved clips returned.")
+
+
+class TranscriptSegmentOut(BaseModel):
+    """One timed line of speech.
+
+    Named `start`/`end` to match the clip shape the frontend already consumes;
+    the route maps them from the model's `start_sec`/`end_sec`.
+    """
+
+    start: float = Field(description="Seconds into the video.")
+    end: float
+    text: str
+
+
+class TranscriptOut(BaseModel):
+    """A video's spoken content as timed text.
+
+    `status` mirrors the video's `transcript_status`, so a client polling this
+    endpoint can tell "not done yet" (`processing`) from "there will never be
+    one" (`skipped` — no audio track, or no ASR endpoint configured).
+    `segments` is empty for every status but `ready`.
+    """
+
+    status: str
+    language: str | None = None
+    error: str | None = None
+    segments: list[TranscriptSegmentOut]
+    count: int = Field(description="Number of transcript segments.")
 
 
 class PresignUploadIn(BaseModel):

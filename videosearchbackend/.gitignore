@@ -27,3 +27,6 @@ uv.lock.tmp
 
 # ignore test uploads
 .test-uploads/
+
+# Postgres dumps taken before migrations
+*.dump

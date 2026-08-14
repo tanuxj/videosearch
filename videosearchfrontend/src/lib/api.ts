@@ -1,4 +1,4 @@
-import type { VideoRecord } from './store'
+import type { TranscriptStatus, VideoRecord } from './store'
 import { API_ENABLED, apiFetch, getAccessToken, url } from './http'
 
 /**
@@ -207,6 +207,82 @@ export async function downloadClip(
   return apiFetch<Blob>(`/api/v1/videos/${videoId}/clip?${params}`, {
     parseBlob: true,
   })
+}
+
+/* ── Transcript ──────────────────────────────────────────── */
+
+export type TranscriptSegment = {
+  /** Seconds into the video where this line is spoken. */
+  start: number
+  end: number
+  text: string
+}
+
+export type Transcript = {
+  status: TranscriptStatus
+  /** Detected spoken language (ISO-639-1 where the server recognised it). */
+  language?: string
+  /** Why transcription failed, when status === 'failed'. */
+  error?: string
+  segments: TranscriptSegment[]
+}
+
+type ApiTranscript = {
+  status?: TranscriptStatus
+  language?: string | null
+  error?: string | null
+  segments?: TranscriptSegment[]
+}
+
+/**
+ * Fetch a video's transcript.
+ *
+ * Worth calling while the video is still `processing`: transcription runs
+ * alongside frame embedding and normally finishes first, so this returns real
+ * segments long before the video is searchable.
+ */
+export async function fetchTranscript(videoId: string): Promise<Transcript> {
+  const data = await apiFetch<ApiTranscript>(`/api/v1/videos/${videoId}/transcript`)
+  return {
+    status: data.status ?? 'skipped',
+    language: data.language ?? undefined,
+    error: data.error ?? undefined,
+    segments: data.segments ?? [],
+  }
+}
+
+/**
+ * Ask the server to generate (or regenerate) a video's transcript.
+ *
+ * The frame index is untouched. This is what un-sticks a video reporting
+ * `skipped` — one indexed before transcription existed, or while the server
+ * had no ASR key. Returns once the job is queued, not once it finishes; poll
+ * `fetchTranscript` for the result.
+ */
+export async function startTranscription(videoId: string): Promise<void> {
+  await apiFetch<unknown>(`/api/v1/videos/${videoId}/transcribe`, {
+    method: 'POST',
+  })
+}
+
+/**
+ * Fetch the WebVTT subtitles as an object URL for a `<track>` element.
+ *
+ * A `<track src>` is loaded by the browser itself, which sends no
+ * `Authorization` header — so pointing it at the API directly always 401s.
+ * Fetching the document through the authenticated client and handing the
+ * player a blob: URL is the same trick `streamSourceFor` uses for the video.
+ *
+ * The caller owns the returned URL and must `URL.revokeObjectURL` it.
+ */
+export async function captionsObjectUrl(videoId: string): Promise<string> {
+  const blob = await apiFetch<Blob>(`/api/v1/videos/${videoId}/captions.vtt`, {
+    parseBlob: true,
+  })
+  // The blob comes back typed `text/vtt` from the server, but Safari refuses a
+  // track whose type it can't confirm — restate it rather than trust the
+  // round trip.
+  return URL.createObjectURL(new Blob([blob], { type: 'text/vtt' }))
 }
 
 /** Save a Blob to the user's disk as a real file download. */

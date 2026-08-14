@@ -63,6 +63,19 @@ x-backend-env: &backend_env
   URL_IMPORT_ALLOW_PRIVATE: ${URL_IMPORT_ALLOW_PRIVATE:-false}
   URL_IMPORT_MAX_BATCH: ${URL_IMPORT_MAX_BATCH:-50}
   URL_IMPORT_EXPAND_PLAYLISTS: ${URL_IMPORT_EXPAND_PLAYLISTS:-false}
+  # Transcription (speech → text). An empty STT_API_KEY disables it entirely
+  # and videos report transcript_status="skipped" — so this must be passed
+  # through, or the container silently produces no subtitles however the
+  # host .env is configured. Never leave the numeric ones empty ('' fails
+  # pydantic's parsing and the migrate service aborts).
+  STT_API_KEY: ${STT_API_KEY:-}
+  STT_BASE_URL: ${STT_BASE_URL:-https://api.groq.com/openai/v1}
+  STT_MODEL: ${STT_MODEL:-whisper-large-v3-turbo}
+  STT_LANGUAGE: ${STT_LANGUAGE:-}
+  STT_CHUNK_SECONDS: ${STT_CHUNK_SECONDS:-600}
+  STT_MAX_CONCURRENCY: ${STT_MAX_CONCURRENCY:-4}
+  STT_TIMEOUT_SECONDS: ${STT_TIMEOUT_SECONDS:-300}
+  STT_NO_SPEECH_THRESHOLD: ${STT_NO_SPEECH_THRESHOLD:-0.6}
   # Inside the compose network the DB host is the service name "db".
   POSTGRES_HOST: db
   POSTGRES_PORT: 5432

@@ -159,6 +159,36 @@ class Settings(BaseSettings):
     llm_expand_prompts: int = Field(default=2, ge=0, le=5)
     llm_timeout_seconds: float = Field(default=15.0, ge=1.0, le=120.0)
 
+    # ── Transcription (speech → text) ───────────────────────────
+    # Whisper-family ASR over any OpenAI-compatible `/audio/transcriptions`
+    # endpoint. Groq is the default host: `whisper-large-v3-turbo` transcribes
+    # an hour of audio in well under a minute, which is what makes the
+    # transcript land while frame indexing is still running.
+    #
+    # Transcription is off until `stt_api_key` is set — videos then carry
+    # `transcript_status="skipped"` and the app behaves exactly as before.
+    stt_api_key: str | None = None
+    stt_base_url: str = "https://api.groq.com/openai/v1"
+    stt_model: str = "whisper-large-v3-turbo"
+    # ISO-639-1 hint (e.g. "en"). Leave unset for automatic detection — the
+    # model reports what it heard and it is stored on the video row.
+    stt_language: str | None = None
+    stt_timeout_seconds: float = Field(default=300.0, ge=5.0, le=1800.0)
+    # Audio is split into chunks of this many seconds before upload. Keeps
+    # every request under the provider's file-size cap and lets long videos
+    # transcribe in parallel instead of end to end.
+    stt_chunk_seconds: float = Field(default=600.0, ge=30.0, le=3600.0)
+    # Chunks transcribed concurrently. Above ~4 most providers rate-limit
+    # rather than go faster.
+    stt_max_concurrency: int = Field(default=4, ge=1, le=16)
+    # Mono, 16 kHz — Whisper resamples to this anyway, so sending more is
+    # upload time for nothing.
+    stt_audio_bitrate: str = "16k"
+    # Whisper emits confident-sounding text over silence and music. Segments
+    # whose no-speech probability is above this are dropped rather than shown
+    # to the user as real dialogue.
+    stt_no_speech_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+
     # ── URL import (paste-a-link) ───────────────────────────────
     # Let users index videos by pasting a URL (YouTube, Twitch, Zoom,
     # Vimeo, or a direct video file link). The backend downloads the video
@@ -236,6 +266,11 @@ class Settings(BaseSettings):
     @property
     def refresh_token_ttl_seconds(self) -> int:
         return self.refresh_token_ttl_days * 24 * 60 * 60
+
+    @property
+    def transcription_configured(self) -> bool:
+        """True when an ASR endpoint is available to transcribe audio with."""
+        return bool(self.stt_api_key and self.stt_base_url and self.stt_model)
 
     @property
     def storage_configured(self) -> bool:

@@ -27,13 +27,13 @@ from fastapi import (
     status,
 )
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from app.auth.deps import CurrentUser, DbSession
 from app.auth.schemas import MessageResponse
 from app.core.config import get_settings
-from app.videos import clips, pipeline, saved_clips, url_import
+from app.videos import clips, pipeline, saved_clips, transcribe, url_import
 from app.videos import service as videos_service
 from app.videos.schemas import (
     CompleteMultipartIn,
@@ -44,6 +44,8 @@ from app.videos.schemas import (
     PresignUploadOut,
     SavedClipListOut,
     StreamUrlOut,
+    TranscriptOut,
+    TranscriptSegmentOut,
     UrlImportBatchIn,
     UrlImportBatchOut,
     UrlImportIn,
@@ -745,6 +747,118 @@ async def stream_video(
     ext = f".{video.storage_key.rsplit('.', 1)[-1].lower()}"
     media_type = videos_service.MEDIA_TYPES.get(ext)
     return storage.stream_response(video.storage_key, media_type, request.headers.get("range"))
+
+
+@router.get(
+    "/{video_id}/transcript",
+    response_model=TranscriptOut,
+    summary="The video's spoken content as timed text",
+    description=(
+        "Segments are available as soon as transcription finishes, which is "
+        "normally well before frame indexing does — poll this while `status` "
+        "is still `processing` to show the transcript early. `status` is "
+        "`skipped` when the video has no audio or no ASR endpoint is "
+        "configured, so a client can stop polling."
+    ),
+    responses={404: {"description": "Video not found"}},
+)
+async def get_transcript(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> TranscriptOut:
+    try:
+        video = await videos_service.get_video(db, user.id, video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+
+    segments = await videos_service.list_transcript_segments(db, video_id)
+    return TranscriptOut(
+        status=video.transcript_status,
+        language=video.language,
+        error=video.transcript_error,
+        segments=[
+            TranscriptSegmentOut(start=item.start_sec, end=item.end_sec, text=item.text)
+            for item in segments
+        ],
+        count=len(segments),
+    )
+
+
+@router.post(
+    "/{video_id}/transcribe",
+    response_model=VideoOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Generate (or regenerate) this video's transcript",
+    description=(
+        "Runs the transcription pass on an already-indexed video and leaves "
+        "its frame index untouched. This is the route back for videos indexed "
+        "before transcription existed, ones whose transcription failed, and "
+        "ones indexed while no ASR endpoint was configured — all of which "
+        'report `transcript_status="skipped"` and would otherwise be stuck '
+        "there. Any existing segments are replaced."
+    ),
+    responses={
+        404: {"description": "Video not found"},
+        409: {"description": "Transcription unavailable or already running"},
+    },
+)
+async def start_transcription(
+    user: CurrentUser,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
+    video_id: uuid.UUID,
+) -> VideoOut:
+    try:
+        video = await videos_service.get_video(db, user.id, video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+
+    if not settings.transcription_configured:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Transcription is not configured on this server (set STT_API_KEY).",
+        )
+    if video.transcript_status == "processing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A transcript is already being generated for this video.",
+        )
+
+    # Published before the job starts so the client's very next poll already
+    # shows work in flight rather than the stale `skipped`.
+    video.transcript_status = "pending"
+    video.transcript_error = None
+    await db.commit()
+    await db.refresh(video)
+
+    background_tasks.add_task(pipeline.transcribe_existing, video.id)
+    return VideoOut.model_validate(video)
+
+
+@router.get(
+    "/{video_id}/captions.vtt",
+    response_class=PlainTextResponse,
+    response_model=None,
+    summary="Subtitles as WebVTT",
+    description=(
+        "The transcript rendered as a WebVTT document for a `<track>` element. "
+        "Always 200 with a valid document — a video with no transcript yet "
+        "returns a cue-less `WEBVTT` header rather than a 404, so the player "
+        "can attach the track unconditionally."
+    ),
+    responses={404: {"description": "Video not found"}},
+)
+async def get_captions(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> PlainTextResponse:
+    try:
+        await videos_service.get_video(db, user.id, video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+
+    segments = await videos_service.list_transcript_segments(db, video_id)
+    body = transcribe.to_vtt(
+        [
+            transcribe.Segment(start=item.start_sec, end=item.end_sec, text=item.text)
+            for item in segments
+        ]
+    )
+    return PlainTextResponse(body, media_type="text/vtt; charset=utf-8")
 
 
 @router.get(

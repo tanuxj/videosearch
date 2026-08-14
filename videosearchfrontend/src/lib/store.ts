@@ -29,6 +29,22 @@ export type SavedClip = Clip & {
 
 export type VideoStatus = 'processing' | 'ready' | 'failed'
 
+/**
+ * Transcription's own lifecycle, tracked separately from `VideoStatus`.
+ *
+ * Speech recognition takes seconds where frame embedding takes minutes, so a
+ * video is routinely `status: 'processing'` with `transcriptStatus: 'ready'` —
+ * that gap is the point, it's what lets the transcript show up early.
+ * `'skipped'` means there will never be one (no audio track, or the server has
+ * no ASR endpoint configured), so the UI can stop waiting.
+ */
+export type TranscriptStatus =
+  | 'pending'
+  | 'processing'
+  | 'ready'
+  | 'failed'
+  | 'skipped'
+
 export type VideoRecord = {
   id: string
   name: string
@@ -45,6 +61,9 @@ export type VideoRecord = {
    */
   framesTotal: number
   status: VideoStatus
+  transcriptStatus: TranscriptStatus
+  /** Detected spoken language (ISO-639-1 where known) — the track's srclang. */
+  language?: string
   createdAt: string
   /** Small JPEG data URL captured from the first seconds of the video. */
   poster?: string
@@ -62,6 +81,8 @@ type ApiVideo = {
   error: string | null
   frames_total: number
   frames_indexed: number
+  transcript_status?: TranscriptStatus
+  language?: string | null
   created_at: string
 }
 
@@ -116,6 +137,10 @@ function toRecord(video: ApiVideo): VideoRecord {
     frames: video.frames_indexed,
     framesTotal: video.frames_total,
     status: video.status,
+    // An older backend omits these entirely — treat that as "no transcript
+    // coming" rather than leaving the UI polling forever.
+    transcriptStatus: video.transcript_status ?? 'skipped',
+    language: video.language ?? undefined,
     createdAt: video.created_at,
     error: video.error ?? undefined,
   }
@@ -553,6 +578,15 @@ export async function streamSourceFor(videoId: string): Promise<string> {
 
 /* ── Live library view ───────────────────────────────────── */
 
+/** Whether a video still has work in flight worth re-polling for. */
+function isSettling(video: VideoRecord): boolean {
+  return (
+    video.status === 'processing' ||
+    video.transcriptStatus === 'pending' ||
+    video.transcriptStatus === 'processing'
+  )
+}
+
 /**
  * Live view of the user's library; re-renders when videos change and, in
  * server mode, re-polls while anything is still indexing.
@@ -570,7 +604,9 @@ export function useVideos(userId: string | undefined): VideoRecord[] {
       .then((items) => {
         setVideos(items)
         // If anything is still indexing, keep polling so status/progress move.
-        if (items.some((video) => video.status === 'processing')) {
+        // Transcription counts: it finishes on its own clock, usually while
+        // frames are still going, and the poll is how the transcript appears.
+        if (items.some(isSettling)) {
           window.setTimeout(() => setRefreshTick((tick) => tick + 1), POLL_MS)
         }
       })
