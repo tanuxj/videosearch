@@ -1,0 +1,107 @@
+/* ═══════════════════════════════════════════════════════════
+   Styling entry point.
+
+   Two systems coexist on purpose:
+
+   * `index.css` — the original hand-written design system. Still the
+     source of truth for every screen that has not been rebuilt yet, and
+     the owner of the `--bg` / `--text` / `--accent` design tokens.
+   * Tailwind utilities — used by the new components under `components/ui`.
+
+   `index.css` is imported into a `legacy` cascade layer declared *before*
+   Tailwind's, so a utility class always wins over a legacy rule. That
+   matters because `index.css` styles bare elements (`button { font: inherit }`,
+   `h1–h4 { font-weight: 700 }`, `a { color: inherit }`) and unlayered CSS
+   otherwise beats layered CSS no matter the import order. Layering it does not
+   change how `index.css` rules rank against *each other* — only against
+   Tailwind.
+
+   Preflight is deliberately not imported: `index.css` already ships its own
+   reset, and Tailwind's would fight it.
+   ═══════════════════════════════════════════════════════════ */
+
+@layer legacy, theme, base, components, utilities;
+
+@import './index.css' layer(legacy);
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities);
+
+/* Bridge the existing tokens into Tailwind's theme so both systems render the
+   same blues, greys and radii. Changing a value in `index.css` :root still
+   flows through to the Tailwind utilities. */
+@theme {
+  --color-surface: var(--bg);
+  --color-surface-soft: var(--bg-soft);
+  --color-surface-sunk: var(--bg-sunk);
+  --color-panel: var(--panel);
+
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+
+  --color-ink: var(--text);
+  --color-ink-mid: var(--text-mid);
+  --color-ink-dim: var(--text-dim);
+  --color-ink-faint: var(--text-faint);
+
+  --color-brand: var(--accent);
+  --color-brand-hover: var(--accent-hover);
+  --color-brand-alt: var(--accent-2);
+  --color-brand-wash: var(--accent-wash);
+  --color-brand-line: var(--accent-line);
+
+  --color-ok: var(--ok);
+  --color-ok-wash: var(--ok-wash);
+  --color-warn: var(--warn);
+  --color-warn-wash: var(--warn-wash);
+  --color-danger: var(--danger);
+  --color-danger-wash: var(--danger-wash);
+
+  --radius-sm: var(--r-sm);
+  --radius-DEFAULT: var(--r);
+  --radius-lg: var(--r-lg);
+  --radius-xl: var(--r-xl);
+
+  --font-sans: var(--font);
+  --font-mono: var(--mono);
+
+  /* The only decorative animation left. Everything else that moves does so to
+     orient the reader (a dialog entering, a dropdown opening) and is handled by
+     motion/react at the component that owns it. */
+  --animate-shimmer: shimmer 1.6s linear infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -160% 0;
+  }
+  100% {
+    background-position: 260% 0;
+  }
+}
+
+@layer base {
+  /* Safety net for icons.
+     `components/Icons.tsx` renders bare <svg viewBox="0 0 24 24"> with no
+     width/height, and every sizing rule in index.css was scoped to a legacy
+     class name (`.btn svg`, `.side-link svg`, …) that the rebuild removed. An
+     SVG with no intrinsic size falls back to 300x150, so a single missed
+     `[&_svg]:size-*` would blow the layout apart. Scaling to the text context
+     keeps icons sane by default; because this sits in `base`, any explicit
+     size utility still wins. */
+  svg {
+    width: 1.15em;
+    height: 1.15em;
+    flex-shrink: 0;
+  }
+}
+
+/* Respect the OS setting — every decorative animation above is opt-out. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

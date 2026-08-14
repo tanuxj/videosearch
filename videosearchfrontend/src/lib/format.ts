@@ -8,6 +8,18 @@ export function timecode(seconds: number): string {
   return `${h > 0 ? `${h}:` : ''}${mm}:${String(s).padStart(2, '0')}`
 }
 
+/**
+ * Timecode with tenths — `4:08.4`.
+ *
+ * Trimming needs sub-second feedback: whole seconds make a handle look stuck
+ * while it is in fact moving.
+ */
+export function timecodeExact(seconds: number): string {
+  const safe = Math.max(0, seconds)
+  const tenths = Math.floor((safe % 1) * 10)
+  return `${timecode(safe)}.${tenths}`
+}
+
 /** Seconds → a compact human duration such as `4m 12s`. */
 export function humanDuration(seconds: number): string {
   const total = Math.max(0, Math.round(seconds))

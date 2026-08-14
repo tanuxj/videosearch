@@ -18,6 +18,7 @@ already implements Range requests.
 
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -74,6 +75,165 @@ class Storage:
     def backend(self) -> str:
         return self._backend
 
+    @property
+    def presign_enabled(self) -> bool:
+        """True when the browser can PUT files straight to storage.
+
+        Only the R2 backend can hand out presigned URLs — local disk has no
+        endpoint for a browser to upload to, so clients must fall back to
+        the multipart path.
+        """
+        return self._client is not None
+
+    def presign_put(self, key: str, content_type: str | None, expires_in: int) -> str | None:
+        """A short-lived URL the browser can PUT an object straight to.
+
+        Returns None when presigned uploads are unavailable (local backend).
+        """
+        if self._client is None:
+            return None
+        assert self._bucket is not None
+        return self._client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": self._bucket,
+                "Key": key,
+                "ContentType": content_type or "application/octet-stream",
+            },
+            ExpiresIn=expires_in,
+        )
+
+    def presign_get(self, key: str, expires_in: int) -> str | None:
+        """A short-lived URL that reads the object, for tools that speak HTTP.
+
+        Used by the clip trimmer so ffmpeg can range-request the segment it
+        needs straight from R2. The alternative — ``get_local_path`` — pulls the
+        entire object down first, which on a 1.4 GB video costs minutes of
+        transfer to keep a few seconds of it.
+
+        Returns None on the local backend, where there is no HTTP endpoint and
+        the caller should use the file path instead.
+        """
+        if self._client is None:
+            return None
+        assert self._bucket is not None
+        return self._client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self._bucket, "Key": key},
+            ExpiresIn=expires_in,
+        )
+
+    def ffmpeg_source(
+        self, key: str, expires_in: int, *, allow_url: bool = True
+    ) -> tuple[str, bool]:
+        """A source ffmpeg can read, plus whether the caller must clean it up.
+
+        Returns ``(source, is_temp_file)``:
+
+        * R2 with ``allow_url`` — a presigned URL, nothing to delete.
+        * Local disk — the stored file's own path, which must **not** be deleted.
+        * R2 without ``allow_url`` — a full temp download, which the caller owns.
+
+        Pass ``allow_url=False`` when the ffmpeg build cannot read network
+        sources (see ``clips.supports_network_input``); the download is far
+        slower but it is the only thing that works with a static binary.
+        """
+        if self._client is None:
+            return str(self._local_path(key)), False
+        if allow_url:
+            url = self.presign_get(key, expires_in)
+            if url is not None:
+                return url, False
+        return str(self.get_local_path(key)), True
+
+    def object_size(self, key: str) -> int | None:
+        """Byte size of the stored object, or None when it does not exist."""
+        if self._client is not None:
+            assert self._bucket is not None
+            try:
+                head = self._client.head_object(Bucket=self._bucket, Key=key)
+                return int(head.get("ContentLength", 0))
+            except ClientError as exc:
+                status_code = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                code = exc.response.get("Error", {}).get("Code", "")
+                if status_code == 404 or code == "404":
+                    return None
+                raise
+        path = self._local_path(key)
+        return path.stat().st_size if path.exists() else None
+
+    def create_multipart_upload(self, key: str, content_type: str | None) -> str | None:
+        """Open an S3/R2 multipart upload for `key`, returning its upload id.
+
+        Returns None when multipart uploads are unavailable (local backend).
+        The browser then uploads chunks to per-part presigned URLs and the
+        parts are assembled with `complete_multipart`.
+        """
+        if self._client is None:
+            return None
+        assert self._bucket is not None
+        response = self._client.create_multipart_upload(
+            Bucket=self._bucket,
+            Key=key,
+            ContentType=content_type or "application/octet-stream",
+        )
+        return response.get("UploadId")
+
+    def presign_part(
+        self,
+        key: str,
+        upload_id: str,
+        part_number: int,
+        expires_in: int,
+    ) -> str | None:
+        """A presigned PUT URL for one chunk of a multipart upload."""
+        if self._client is None:
+            return None
+        assert self._bucket is not None
+        return self._client.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": self._bucket,
+                "Key": key,
+                "UploadId": upload_id,
+                "PartNumber": part_number,
+            },
+            ExpiresIn=expires_in,
+        )
+
+    def complete_multipart(
+        self,
+        key: str,
+        upload_id: str,
+        parts: list[tuple[int, str]],
+    ) -> None:
+        """Assemble the uploaded chunks. `parts` is `(part_number, etag)` pairs."""
+        if self._client is None:
+            return
+        assert self._bucket is not None
+        self._client.complete_multipart_upload(
+            Bucket=self._bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={
+                "Parts": [{"PartNumber": number, "ETag": etag} for number, etag in parts]
+            },
+        )
+
+    def abort_multipart(self, key: str, upload_id: str) -> None:
+        """Discard an in-progress multipart upload. Silent when it is gone."""
+        if self._client is None:
+            return
+        assert self._bucket is not None
+        try:
+            self._client.abort_multipart_upload(
+                Bucket=self._bucket,
+                Key=key,
+                UploadId=upload_id,
+            )
+        except ClientError:  # pragma: no cover - best-effort cleanup
+            logger.warning("Could not abort multipart upload %s/%s", self._bucket, key)
+
     def _local_path(self, key: str) -> Path:
         """Resolve an object key under the upload root, refusing escapes."""
         root = self._root.resolve()
@@ -113,6 +273,48 @@ class Storage:
             self._client.delete_object(Bucket=self._bucket, Key=key)
         else:
             self._local_path(key).unlink(missing_ok=True)
+
+    def save_path(self, key: str, path: Path, content_type: str | None) -> None:
+        """Persist an already-local file under `key`.
+
+        Used when the upload was staged to disk first; boto3's ``upload_file``
+        handles its own file handle, so nothing here can be left half-read.
+        """
+        if self._client is not None:
+            assert self._bucket is not None
+            self._client.upload_file(
+                str(path),
+                self._bucket,
+                key,
+                ExtraArgs={"ContentType": content_type or "application/octet-stream"},
+            )
+        else:
+            dest = self._local_path(key)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, dest)
+
+    def spill_to_temp(self, source, suffix: str = "") -> Path:
+        """Copy an uploaded file-like to a temp file and return its path.
+
+        Lets the indexing pipeline read bytes that are already on this machine
+        instead of pulling the object back out of R2 — a local disk copy costs
+        far less than the ~0.36 s/MB download it replaces. The caller owns the
+        returned file and must delete it.
+
+        Call this *before* handing the stream to ``save_file``: boto3 closes the
+        file object it uploads from, and a closed SpooledTemporaryFile cannot be
+        re-read ("seek of closed file").
+        """
+        source.seek(0)
+        fd, name = tempfile.mkstemp(prefix="videosearch-upload-", suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as target:
+                while chunk := source.read(1024 * 1024):
+                    target.write(chunk)
+        except Exception:
+            Path(name).unlink(missing_ok=True)
+            raise
+        return Path(name)
 
     def get_local_path(self, key: str) -> Path:
         """A local filesystem path holding the object's bytes.

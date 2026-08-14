@@ -1,5 +1,5 @@
 import type { VideoRecord } from './store'
-import { API_ENABLED, getAccessToken, url } from './http'
+import { API_ENABLED, apiFetch, getAccessToken, url } from './http'
 
 /**
  * Clip search. When VITE_API_URL is set the prompt goes to the backend's
@@ -25,6 +25,15 @@ export type SearchResult = {
   /** 'api' = ranked by the backend, 'local' = deterministic demo ranking. */
   source: 'api' | 'local'
   tookMs: number
+  /**
+   * Backend's minimum-similarity threshold (0–1) — everything below it was
+   * filtered out as a non-match.
+   */
+  minScore?: number
+  /** True when the backend rewrote/expanded the prompt into visual variants. */
+  expanded?: boolean
+  /** Set when the backend is configured but could not run the search. */
+  error?: string
 }
 
 type ApiClip = {
@@ -103,47 +112,112 @@ export async function searchClips(
 ): Promise<SearchResult> {
   const startedAt = performance.now()
 
-  if (API_ENABLED) {
-    try {
-      const response = await fetch(url('/api/v1/search/clips'), {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
-        },
-        body: JSON.stringify({ video_id: video.id, prompt, limit }),
-      })
-      if (response.ok) {
-        const data = (await response.json()) as { items?: ApiClip[] }
-        const clips = (data.items ?? []).map((item, index) => {
-          const frame = item.timestamp ?? item.start ?? 0
-          const start = item.start ?? Math.max(0, frame - 1.8)
-          return {
-            id: item.id ?? `${video.id}-api-${index}`,
-            videoId: video.id,
-            start,
-            end: item.end ?? start + 6,
-            frame,
-            score: item.score ?? 0,
-          }
-        })
-        return {
-          clips,
-          source: 'api',
-          tookMs: Math.round(performance.now() - startedAt),
-        }
-      }
-    } catch {
-      // Backend unreachable or rejected — fall through to the local ranking.
+  // No backend configured — deterministic demo ranking, clearly labelled.
+  if (!API_ENABLED) {
+    await new Promise((resolve) => setTimeout(resolve, 420))
+    return {
+      clips: localSearch(video, prompt, limit),
+      source: 'local',
+      tookMs: Math.round(performance.now() - startedAt),
     }
   }
 
-  // Keep the perceived latency honest-looking without stalling the UI.
-  await new Promise((resolve) => setTimeout(resolve, 420))
-  return {
-    clips: localSearch(video, prompt, limit),
-    source: 'local',
-    tookMs: Math.round(performance.now() - startedAt),
+  try {
+    const response = await fetch(url('/api/v1/search/clips'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
+      },
+      body: JSON.stringify({ video_id: video.id, prompt, limit }),
+    })
+    if (response.ok) {
+      const data = (await response.json()) as {
+        items?: ApiClip[]
+        min_score?: number
+        expanded?: boolean
+      }
+      const clips = (data.items ?? []).map((item, index) => {
+        const frame = item.timestamp ?? item.start ?? 0
+        const start = item.start ?? Math.max(0, frame - 1.8)
+        return {
+          id: item.id ?? `${video.id}-api-${index}`,
+          videoId: video.id,
+          start,
+          end: item.end ?? start + 6,
+          frame,
+          score: item.score ?? 0,
+        }
+      })
+      return {
+        clips,
+        source: 'api',
+        tookMs: Math.round(performance.now() - startedAt),
+        minScore: data.min_score ?? 0,
+        expanded: data.expanded ?? false,
+      }
+    }
+
+    // The backend answered with a real error — surface it instead of
+    // fabricating "matches" the video never contained.
+    return {
+      clips: [],
+      source: 'api',
+      tookMs: Math.round(performance.now() - startedAt),
+      error: await readError(response, 'Search failed'),
+    }
+  } catch {
+    return {
+      clips: [],
+      source: 'api',
+      tookMs: Math.round(performance.now() - startedAt),
+      error: 'The search backend is unreachable — check that it’s running.',
+    }
   }
+}
+
+async function readError(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = await response.json()
+    const detail = body?.detail
+    if (typeof detail === 'string') return detail
+    if (Array.isArray(detail) && detail[0]?.msg) return String(detail[0].msg)
+  } catch {
+    /* not JSON */
+  }
+  return fallback
+}
+
+/**
+ * Download a trimmed clip ([start, end) seconds) of a video as a Blob.
+ *
+ * The backend cuts the segment with ffmpeg and streams it back as an MP4
+ * attachment. Falls back to the raw API error when the request fails.
+ */
+export async function downloadClip(
+  videoId: string,
+  start: number,
+  end: number,
+): Promise<Blob> {
+  const params = new URLSearchParams({
+    start: String(start),
+    end: String(end),
+  })
+  return apiFetch<Blob>(`/api/v1/videos/${videoId}/clip?${params}`, {
+    parseBlob: true,
+  })
+}
+
+/** Save a Blob to the user's disk as a real file download. */
+export function saveBlob(blob: Blob, filename: string): void {
+  const objectUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  // Revoke on the next tick so the browser has started the download.
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000)
 }

@@ -2,7 +2,14 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate } from '../lib/router'
 import { authErrorMessage, useAuth } from '../lib/auth'
-import { AuthLayout, Field } from '../components/AuthLayout'
+import {
+  Alert,
+  AuthHead,
+  AuthLayout,
+  Field,
+  Spinner,
+} from '../components/AuthLayout'
+import { Button } from '../components/ui/Button'
 import { LockIcon, MailIcon, UserIcon } from '../components/Icons'
 
 export default function Signup() {
@@ -39,17 +46,12 @@ export default function Signup() {
 
   return (
     <AuthLayout>
-      <div className="auth-head">
-        <h1>Create your account</h1>
-        <p>Upload a video and search it by description in minutes.</p>
-      </div>
+      <AuthHead title="Create your account">
+        Upload a video and search it by description in minutes.
+      </AuthHead>
 
-      <form className="auth-form" onSubmit={handleSubmit} noValidate>
-        {formError && (
-          <p className="alert" role="alert">
-            {formError}
-          </p>
-        )}
+      <form className="flex flex-col gap-4" onSubmit={handleSubmit} noValidate>
+        {formError && <Alert>{formError}</Alert>}
 
         <Field
           label="Full name"
@@ -84,23 +86,35 @@ export default function Signup() {
           hint="Use 8 or more characters."
         />
 
-        <button
-          type="submit"
-          className="btn btn-primary btn-lg btn-block"
-          disabled={busy}
-        >
-          {busy && <span className="spinner" />}
+        <Button type="submit" size="lg" disabled={busy} className="mt-1 w-full">
+          {busy && <Spinner />}
           {busy ? 'Creating account…' : 'Create account'}
-        </button>
+        </Button>
 
-        <p className="auth-legal">
-          By continuing you agree to our <a href="#terms">Terms of Service</a>{' '}
-          and <a href="#privacy">Privacy Policy</a>.
+        <p className="text-center text-[12px] leading-relaxed text-ink-faint">
+          By continuing you agree to our{' '}
+          <a href="#terms" className="text-ink-dim underline underline-offset-2">
+            Terms of Service
+          </a>{' '}
+          and{' '}
+          <a
+            href="#privacy"
+            className="text-ink-dim underline underline-offset-2"
+          >
+            Privacy Policy
+          </a>
+          .
         </p>
       </form>
 
-      <p className="auth-alt">
-        Already have an account? <Link to="/login">Sign in</Link>
+      <p className="mt-6 text-center text-[13.5px] text-ink-dim">
+        Already have an account?{' '}
+        <Link
+          to="/login"
+          className="font-medium text-brand transition-opacity hover:opacity-75"
+        >
+          Sign in
+        </Link>
       </p>
     </AuthLayout>
   )

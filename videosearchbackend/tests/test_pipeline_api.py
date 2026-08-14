@@ -18,8 +18,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from app.core.config import get_settings
 from app.db.session import engine
-from app.videos import embedder, pipeline
+from app.videos import embedder, pipeline, query_expand
 from tests.conftest import needs_db
 
 pytestmark = needs_db
@@ -33,9 +34,7 @@ VECTOR_DIM = 512
 def clip_bytes(tmp_path_factory: pytest.TempPathFactory) -> bytes:
     """A 3-second 64x64 AVI: red, green, blue — one solid second each."""
     path = tmp_path_factory.mktemp("clips") / "scenes.avi"
-    writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64)
-    )
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64))
     # BGR values whose BGR→RGB conversion yields red, green, blue.
     colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
     for color in colors:
@@ -165,6 +164,8 @@ def test_failed_index_cleans_up_partial_frames(
 ) -> None:
     """A failure after some chunks committed must not leak frame rows."""
     # 40 frames at 1fps → the first _EMBED_CHUNK (32) commits, the second fails.
+    # Fixed-rate sampling (scene-aware off) so every frame is a candidate.
+    monkeypatch.setattr(get_settings(), "scene_aware_sampling", False)
     path = tmp_path_factory.mktemp("clips") / "long.avi"
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64))
     for _ in range(40):
@@ -203,7 +204,7 @@ def test_failed_index_cleans_up_partial_frames(
 # ── Search ─────────────────────────────────────────────────────
 
 
-def test_search_returns_best_matching_frame_first(
+def test_search_returns_best_matching_scene_first(
     client: TestClient, fake_embedder: None, clip_bytes: bytes
 ) -> None:
     headers = _signup(client)
@@ -218,12 +219,14 @@ def test_search_returns_best_matching_frame_first(
     assert response.status_code == 200
 
     body = response.json()
-    assert body["count"] == 3
-    # Red is frame 0 → timestamp 0.0, score 1.0.
+    # Red is frame 0 (score 1.0); green/blue score 0.0 and fall under the
+    # minimum-similarity threshold, so they are not returned at all.
+    assert body["count"] == 1
     assert body["items"][0]["timestamp"] == 0.0
     assert body["items"][0]["score"] == 1.0
     assert body["items"][0]["start"] == 0.0
     assert body["items"][0]["end"] > 0.0
+    assert body["min_score"] > 0.0
 
 
 def test_search_ranks_all_colours_correctly(
@@ -239,8 +242,103 @@ def test_search_ranks_all_colours_correctly(
         json={"video_id": video_id, "prompt": "green grass", "limit": 3},
     )
     items = response.json()["items"]
-    # Green is frame 1 → timestamp 1.0 ranks first.
+    # Green is frame 1 → timestamp 1.0 ranks first; blue is filtered by the
+    # threshold, so only the green scene survives.
+    assert len(items) == 1
     assert items[0]["timestamp"] == 1.0
+    assert items[0]["score"] == 1.0
+
+
+def test_search_no_matching_scene_returns_empty(
+    client: TestClient, fake_embedder: None, clip_bytes: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers = _signup(client)
+    video_id = _upload(client, headers, clip_bytes)
+    _index(client, video_id)
+
+    # An embedding orthogonal to every colour's one-hot → 0.0 similarity.
+    vector = [0.0] * VECTOR_DIM
+    vector[3] = 1.0
+    monkeypatch.setattr(embedder, "embed_text", lambda prompt: vector)
+
+    response = client.post(
+        "/api/v1/search/clips",
+        headers=headers,
+        json={"video_id": video_id, "prompt": "a purple elephant", "limit": 3},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 0
+    assert body["items"] == []
+
+
+def test_search_uses_best_score_across_expanded_variants(
+    client: TestClient,
+    fake_embedder: None,
+    clip_bytes: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expansion surfaces scenes the raw prompt alone would miss.
+
+    The fake embedder maps "red" → one-hot[0], "green" → one-hot[1], so the
+    raw prompt "green grass" matches only the green frame. Adding a red
+    variant should surface the red frame too — each frame keeps its best score
+    across variants.
+    """
+    headers = _signup(client)
+    video_id = _upload(client, headers, clip_bytes)
+    _index(client, video_id)
+
+    # Narrow the merge window so the two colours read as separate scenes.
+    monkeypatch.setattr(get_settings(), "search_merge_window_seconds", 0.5)
+    monkeypatch.setattr(
+        query_expand,
+        "expand_prompt",
+        lambda prompt: [prompt, "a red scene"],
+    )
+
+    response = client.post(
+        "/api/v1/search/clips",
+        headers=headers,
+        json={"video_id": video_id, "prompt": "green grass", "limit": 9},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["expanded"] is True
+    assert {item["timestamp"] for item in body["items"]} == {0.0, 1.0}
+
+
+def test_search_merges_adjacent_matches_into_one_scene(
+    client: TestClient,
+    fake_embedder: None,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three consecutive red seconds are one scene spanning 0 → end, not three."""
+    # Fixed-rate sampling so all three frames exist to merge.
+    monkeypatch.setattr(get_settings(), "scene_aware_sampling", False)
+    path = tmp_path_factory.mktemp("clips") / "all-red.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64))
+    for _ in range(3):
+        writer.write(np.full((64, 64, 3), (0, 0, 255), dtype=np.uint8))
+    writer.release()
+
+    headers = _signup(client)
+    files = {"file": ("all-red.avi", io.BytesIO(path.read_bytes()), "video/x-msvideo")}
+    video_id = client.post("/api/v1/videos", headers=headers, files=files).json()["id"]
+    _index(client, video_id)
+
+    response = client.post(
+        "/api/v1/search/clips",
+        headers=headers,
+        json={"video_id": video_id, "prompt": "a red scene", "limit": 9},
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["start"] == 0.0
+    # Frames at t=0, 1, 2 merge; the window is clamped to the 3s duration.
+    assert items[0]["end"] == pytest.approx(3.0, abs=0.05)
     assert items[0]["score"] == 1.0
 
 
@@ -287,3 +385,44 @@ def test_search_requires_auth(client: TestClient, clip_bytes: bytes) -> None:
         json={"video_id": str(uuid.uuid4()), "prompt": "anything", "limit": 3},
     )
     assert response.status_code == 401
+
+
+def test_scene_aware_sampling_skips_redundant_frames(
+    client: TestClient, fake_embedder: None, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """40s video: 20s solid red then 20s solid blue.
+
+    Scene-aware sampling (default on) keeps the first frame of each static run
+    plus one frame every SCENE_MAX_GAP_SECONDS (6s) — 8 frames instead of 40,
+    and both runs remain searchable.
+    """
+    path = tmp_path_factory.mktemp("clips") / "two-runs.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64))
+    for _ in range(20):
+        writer.write(np.full((64, 64, 3), (0, 0, 255), dtype=np.uint8))
+    for _ in range(20):
+        writer.write(np.full((64, 64, 3), (255, 0, 0), dtype=np.uint8))
+    writer.release()
+
+    headers = _signup(client)
+    files = {"file": ("two-runs.avi", io.BytesIO(path.read_bytes()), "video/x-msvideo")}
+    video_id = client.post("/api/v1/videos", headers=headers, files=files).json()["id"]
+    _index(client, video_id)
+
+    body = client.get(f"/api/v1/videos/{video_id}", headers=headers).json()
+    assert body["status"] == "ready"
+    # Kept: red at 0,6,12,18 then blue at 20,26,32,38.
+    assert body["frames_indexed"] == 8
+    assert body["frames_total"] == 8
+
+    async def timestamps() -> list[float]:
+        async with engine.connect() as connection:
+            rows = await connection.execute(
+                text(
+                    "SELECT timestamp_sec FROM frames WHERE video_id = :vid ORDER BY timestamp_sec"
+                ),
+                {"vid": uuid.UUID(video_id)},
+            )
+            return [row[0] for row in rows]
+
+    assert client.portal.call(timestamps) == [0.0, 6.0, 12.0, 18.0, 20.0, 26.0, 32.0, 38.0]

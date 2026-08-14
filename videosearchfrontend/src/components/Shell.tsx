@@ -1,7 +1,15 @@
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Link, useRoute } from '../lib/router'
 import { initials, useAuth } from '../lib/auth'
-import { GridIcon, SearchIcon, SignOutIcon } from './Icons'
+import { cn } from '../lib/cn'
+import { ButtonLink } from './ui/Button'
+import {
+  GridIcon,
+  HistoryIcon,
+  SearchIcon,
+  SignOutIcon,
+  UploadIcon,
+} from './Icons'
 import { LogoMark, Wordmark } from './Logo'
 
 export const APP_NAME: string =
@@ -9,8 +17,12 @@ export const APP_NAME: string =
 
 export function Brand({ to = '/' }: { to?: string }) {
   return (
-    <Link to={to} className="brand" aria-label={`${APP_NAME} home`}>
-      <LogoMark className="brand-mark" />
+    <Link
+      to={to}
+      className="inline-flex items-center gap-2.5"
+      aria-label={`${APP_NAME} home`}
+    >
+      <LogoMark className="size-7" />
       <Wordmark name={APP_NAME} />
     </Link>
   )
@@ -18,49 +30,82 @@ export function Brand({ to = '/' }: { to?: string }) {
 
 /* ── Public / marketing pages ───────────────────────────── */
 
+const MARKETING_LINKS = [
+  { href: '#how', label: 'How it works' },
+  { href: '#features', label: 'Features' },
+  { href: '#pricing', label: 'Pricing' },
+]
+
 export function MarketingShell({ children }: { children: ReactNode }) {
   const { user } = useAuth()
+  // The bar only grows a divider once the page has moved — a line across the
+  // top of a white hero is just a seam.
+  const [scrolled, setScrolled] = useState(false)
+
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 8)
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
 
   return (
-    <div className="marketing">
-      <header className="top-nav">
-        <div className="top-nav-inner">
+    <div className="flex min-h-screen flex-col bg-surface">
+      <header
+        className={cn(
+          'sticky top-0 z-50 bg-surface transition-colors duration-200',
+          scrolled ? 'border-b border-line' : 'border-b border-transparent',
+        )}
+      >
+        <div className="mx-auto flex h-16 w-full max-w-[1080px] items-center gap-6 px-6">
           <Brand />
-          <nav className="top-nav-links">
-            <a href="#how">How it works</a>
-            <a href="#features">Features</a>
-            <a href="#pricing">Pricing</a>
+          <nav className="ml-2 hidden items-center gap-1 md:flex">
+            {MARKETING_LINKS.map((link) => (
+              <a
+                key={link.href}
+                href={link.href}
+                className="rounded-full px-3 py-1.5 text-[13.5px] text-ink-mid transition-colors hover:bg-surface-sunk hover:text-ink"
+              >
+                {link.label}
+              </a>
+            ))}
           </nav>
-          <div className="top-nav-actions">
+          <div className="ml-auto flex items-center gap-2">
             {user ? (
-              <Link to="/search" className="btn btn-primary btn-sm">
+              <ButtonLink as={Link} to="/search" size="sm">
                 Open workspace
-              </Link>
+              </ButtonLink>
             ) : (
               <>
-                <Link to="/login" className="btn btn-quiet btn-sm">
+                <ButtonLink as={Link} to="/login" variant="ghost" size="sm">
                   Sign in
-                </Link>
-                <Link to="/signup" className="btn btn-primary btn-sm">
+                </ButtonLink>
+                <ButtonLink as={Link} to="/signup" size="sm">
                   Get started
-                </Link>
+                </ButtonLink>
               </>
             )}
           </div>
         </div>
       </header>
 
-      <main className="shell-main">{children}</main>
+      <main className="flex-1">{children}</main>
 
-      <footer className="site-footer">
-        <div className="site-footer-inner">
-          <span>
+      <footer className="border-t border-line">
+        <div className="mx-auto flex w-full max-w-[1080px] flex-col items-center justify-between gap-3 px-6 py-7 sm:flex-row">
+          <span className="text-[12.5px] text-ink-faint">
             © {new Date().getFullYear()} {APP_NAME}
           </span>
-          <nav>
-            <a href="#privacy">Privacy</a>
-            <a href="#terms">Terms</a>
-            <a href="#docs">Docs</a>
+          <nav className="flex items-center gap-5">
+            {['Privacy', 'Terms', 'Docs'].map((label) => (
+              <a
+                key={label}
+                href={`#${label.toLowerCase()}`}
+                className="text-[12.5px] text-ink-faint transition-colors hover:text-ink"
+              >
+                {label}
+              </a>
+            ))}
           </nav>
         </div>
       </footer>
@@ -70,10 +115,9 @@ export function MarketingShell({ children }: { children: ReactNode }) {
 
 /* ── Authenticated app ──────────────────────────────────── */
 
-// Upload isn't a page any more — it's a dialog you can open from anywhere,
-// so the workspace is just "find a scene" and "the library you search over".
-const NAV = [
-  { to: '/search', label: 'Find a scene', icon: SearchIcon },
+const NAV_MAIN = [
+  { to: '/search', label: 'Search', icon: SearchIcon },
+  { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/dashboard', label: 'Library', icon: GridIcon },
 ]
 
@@ -84,49 +128,93 @@ type AppShellProps = {
   children: ReactNode
 }
 
+function NavLink({
+  to,
+  label,
+  icon: Icon,
+  active,
+}: {
+  to: string
+  label: string
+  icon: (props: { className?: string }) => ReactNode
+  active: boolean
+}) {
+  return (
+    <Link
+      to={to}
+      aria-current={active ? 'page' : undefined}
+      className={cn(
+        'flex items-center gap-3 rounded-lg px-3 py-2 text-[13.5px] transition-colors',
+        '[&_svg]:size-[17px] [&_svg]:shrink-0',
+        active
+          ? 'bg-surface-sunk font-medium text-ink'
+          : 'text-ink-mid hover:bg-surface-soft hover:text-ink',
+      )}
+    >
+      <Icon />
+      <span className="truncate">{label}</span>
+    </Link>
+  )
+}
+
 export function AppShell({ title, subtitle, actions, children }: AppShellProps) {
   const route = useRoute()
   const { user, signOut } = useAuth()
 
   return (
-    <div className="app-shell">
-      <aside className="side">
-        <div className="side-brand">
+    <div className="flex min-h-screen bg-surface">
+      <aside className="sticky top-0 hidden h-screen w-[240px] shrink-0 flex-col border-r border-line bg-surface md:flex">
+        <div className="flex h-16 items-center px-4">
           <Brand to="/dashboard" />
         </div>
 
-        <p className="side-label">Workspace</p>
-        <nav className="side-nav">
-          {NAV.map((item) => {
-            const Icon = item.icon
-            return (
-              <Link
-                key={item.to}
-                to={item.to}
-                className={`side-link${route === item.to ? ' is-active' : ''}`}
-                aria-current={route === item.to ? 'page' : undefined}
-              >
-                <Icon />
-                <span>{item.label}</span>
-              </Link>
-            )
-          })}
+        <nav className="flex flex-col gap-0.5 px-2">
+          {NAV_MAIN.map((item) => (
+            <NavLink
+              key={item.to}
+              {...item}
+              active={route === item.to}
+            />
+          ))}
         </nav>
 
-        <div className="side-foot">
+        {/* Thin rule between "what you do" and "what you own", matching the
+            reference's grouped sidebar. */}
+        <div className="mx-4 my-3 border-t border-line" />
+
+        <p className="px-4 pb-1.5 text-[11px] font-medium tracking-[0.06em] text-ink-faint uppercase">
+          Library
+        </p>
+        <nav className="flex flex-col gap-0.5 px-2">
+          <Link
+            to="/search?upload=1"
+            className="flex items-center gap-3 rounded-lg px-3 py-2 text-[13.5px] text-ink-mid transition-colors hover:bg-surface-soft hover:text-ink [&_svg]:size-[17px]"
+          >
+            <UploadIcon />
+            <span>Add a video</span>
+          </Link>
+        </nav>
+
+        <div className="mt-auto border-t border-line p-2">
           {user && (
-            <div className="side-user">
-              <span className="avatar">{initials(user.name)}</span>
-              <div>
-                <b>{user.name}</b>
-                <span>{user.email}</span>
+            <div className="flex items-center gap-2.5 rounded-lg px-2 py-2">
+              <span className="grid size-8 shrink-0 place-items-center rounded-full bg-brand text-[12px] font-semibold text-white">
+                {initials(user.name)}
+              </span>
+              <div className="min-w-0 flex-1">
+                <b className="block truncate text-[13px] font-medium text-ink">
+                  {user.name}
+                </b>
+                <span className="block truncate text-[11.5px] text-ink-faint">
+                  Free
+                </span>
               </div>
             </div>
           )}
           <button
             type="button"
-            className="btn btn-quiet btn-sm side-signout"
             onClick={signOut}
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-ink-dim transition-colors hover:bg-surface-soft hover:text-ink [&_svg]:size-4"
           >
             <SignOutIcon />
             Sign out
@@ -134,15 +222,43 @@ export function AppShell({ title, subtitle, actions, children }: AppShellProps) 
         </div>
       </aside>
 
-      <div className="app-body">
-        <header className="app-topbar">
-          <div>
-            <h1>{title}</h1>
-            {subtitle && <p>{subtitle}</p>}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="sticky top-0 z-40 flex flex-wrap items-center justify-between gap-4 border-b border-line bg-surface px-6 py-3.5">
+          <div className="min-w-0">
+            <h1 className="text-[17px] leading-tight font-semibold tracking-[-0.02em] text-ink">
+              {title}
+            </h1>
+            {subtitle && (
+              <p className="mt-0.5 text-[12.5px] text-ink-dim">{subtitle}</p>
+            )}
           </div>
-          {actions && <div className="app-topbar-actions">{actions}</div>}
+          {actions && <div className="flex items-center gap-2">{actions}</div>}
         </header>
-        <div className="page">{children}</div>
+
+        {/* Mobile nav — the sidebar is hidden under md. */}
+        <nav className="flex gap-1 border-b border-line px-3 py-2 md:hidden">
+          {NAV_MAIN.map((item) => {
+            const Icon = item.icon
+            const active = route === item.to
+            return (
+              <Link
+                key={item.to}
+                to={item.to}
+                className={cn(
+                  'flex flex-1 items-center justify-center gap-2 rounded-full py-1.5 text-[13px] [&_svg]:size-4',
+                  active
+                    ? 'bg-surface-sunk font-medium text-ink'
+                    : 'text-ink-mid',
+                )}
+              >
+                <Icon />
+                {item.label}
+              </Link>
+            )
+          })}
+        </nav>
+
+        <div className="min-w-0 flex-1 px-6 py-6">{children}</div>
       </div>
     </div>
   )

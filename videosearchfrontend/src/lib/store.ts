@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { Clip } from './api'
 import { API_ENABLED, ApiError, apiFetch, getAccessToken, url } from './http'
 
 /**
@@ -23,7 +24,16 @@ export type VideoRecord = {
   name: string
   sizeBytes: number
   duration: number
+  /** Frames embedded so far — the numerator of indexing progress. */
   frames: number
+  /**
+   * Frames the backend expects to embed in total.
+   *
+   * Published before any embedding starts and re-projected as sampling
+   * proceeds, so `frames / framesTotal` is real progress. 0 until the server
+   * has probed the file.
+   */
+  framesTotal: number
   status: VideoStatus
   createdAt: string
   /** Small JPEG data URL captured from the first seconds of the video. */
@@ -94,6 +104,7 @@ function toRecord(video: ApiVideo): VideoRecord {
     sizeBytes: video.size_bytes,
     duration: video.duration_seconds ?? 0,
     frames: video.frames_indexed,
+    framesTotal: video.frames_total,
     status: video.status,
     createdAt: video.created_at,
     error: video.error ?? undefined,
@@ -126,11 +137,123 @@ export async function getVideo(videoId: string): Promise<VideoRecord | null> {
   }
 }
 
+type PresignUpload = {
+  video: ApiVideo
+  upload_url: string | null
+  expires_in: number
+}
+
+type CompleteUpload = {
+  video: ApiVideo
+  message: string
+}
+
+type MultipartPart = {
+  part_number: number
+  url: string
+}
+
+type PresignMultipart = {
+  video: ApiVideo
+  upload_id: string
+  part_size: number
+  parts: MultipartPart[]
+  expires_in: number
+}
+
+// S3/R2 hard cap for a single PUT — files larger than this go through the
+// chunked multipart flow (presigned per-part URLs) instead.
+const SINGLE_PUT_LIMIT = 5 * 1024 * 1024 * 1024
+
 /**
- * Create a video on the server. The multipart body is sent directly (with the
- * bearer token) because `apiFetch` assumes JSON.
+ * PUT a file (or chunk) to a presigned URL with real upload progress.
+ *
+ * `fetch` cannot report upload progress, so this uses XHR for the body
+ * transfer only — the progress callback drives the dialog's progress bar
+ * while the browser streams the bytes straight to R2. Resolves with the
+ * object's ETag, which multipart completion needs.
  */
-export async function createVideoApi(
+function putFile(
+  url: string,
+  file: Blob,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', url)
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(event.loaded, event.total)
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.getResponseHeader('ETag'))
+      } else {
+        reject(new ApiError(xhr.status, `Upload to storage failed (${xhr.status})`))
+      }
+    }
+    xhr.onerror = () => reject(new ApiError(0, 'Upload to storage failed — check your connection'))
+    xhr.send(file)
+  })
+}
+
+/**
+ * Chunked upload of a file larger than the 5 GiB single-PUT cap.
+ *
+ * The API opens an S3/R2 multipart upload and returns one presigned PUT URL
+ * per chunk; the browser slices the file, PUTs each chunk straight to
+ * storage (tracking overall progress), then the API assembles them. Bytes
+ * never buffer in the API.
+ */
+async function createMultipartApi(
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<VideoRecord> {
+  const data = await apiFetch<PresignMultipart>('/api/v1/videos/presign/multipart', {
+    method: 'POST',
+    body: JSON.stringify({
+      filename: file.name,
+      size_bytes: file.size,
+      content_type: file.type || 'application/octet-stream',
+    }),
+  })
+
+  let uploaded = 0
+  const parts: { part_number: number; etag: string }[] = []
+  try {
+    for (const part of data.parts) {
+      const chunk = file.slice(
+        (part.part_number - 1) * data.part_size,
+        Math.min(part.part_number * data.part_size, file.size),
+      )
+      const etag = await putFile(part.url, chunk, (loaded, total) => {
+        if (total > 0) onProgress?.(uploaded + loaded, file.size)
+      })
+      if (!etag) {
+        throw new ApiError(0, 'Storage did not confirm a chunk — try again.')
+      }
+      parts.push({ part_number: part.part_number, etag })
+      uploaded += chunk.size
+    }
+
+    const completed = await apiFetch<CompleteUpload>(
+      `/api/v1/videos/${data.video.id}/complete/multipart`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ upload_id: data.upload_id, parts }),
+      },
+    )
+    return toRecord(completed.video)
+  } catch (error) {
+    // The transfer or the confirmation failed — don't leave a zombie
+    // `processing` row (and its orphaned object) behind.
+    void apiFetch(`/api/v1/videos/${data.video.id}`, { method: 'DELETE' }).catch(() => {})
+    throw error
+  }
+}
+
+/** Upload through the API (local dev storage / presigning unavailable). */
+async function uploadViaApi(
   file: File,
   onProgress?: (loaded: number, total: number) => void,
 ): Promise<VideoRecord> {
@@ -153,6 +276,76 @@ export async function createVideoApi(
   return toRecord(video)
 }
 
+/**
+ * Create a video on the server.
+ *
+ * Fast path: the API reserves a `processing` row and hands back a presigned
+ * PUT URL, the browser uploads the file straight to R2 (no API buffering, no
+ * double hop), then calls `complete` to start indexing.
+ *
+ * Fallback: when the backend cannot presign (local storage), upload via the
+ * classic multipart endpoint so dev/test setups keep working unchanged.
+ */
+export async function createVideoApi(
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<VideoRecord> {
+  // Files above the 5 GiB single-PUT cap go through the chunked multipart
+  // flow. A 409 there means storage can't presign at all (local dev) — the
+  // file then buffers through the API instead.
+  if (file.size > SINGLE_PUT_LIMIT) {
+    try {
+      return await createMultipartApi(file, onProgress)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        return uploadViaApi(file, onProgress)
+      }
+      throw error
+    }
+  }
+
+  // Fast path: presigned direct upload. 409 here means storage can't presign
+  // (e.g. local dev) — fall through to multipart. Other errors are real
+  // failures (unsupported type, too large) and must surface to the user.
+  let presigned: PresignUpload | null = null
+  try {
+    const data = await apiFetch<PresignUpload>('/api/v1/videos/presign', {
+      method: 'POST',
+      body: JSON.stringify({
+        filename: file.name,
+        size_bytes: file.size,
+        content_type: file.type || 'application/octet-stream',
+      }),
+    })
+    presigned = data.upload_url ? data : null
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      presigned = null
+    } else {
+      throw error
+    }
+  }
+
+  if (presigned && presigned.upload_url) {
+    try {
+      await putFile(presigned.upload_url, file, onProgress)
+      const completed = await apiFetch<CompleteUpload>(
+        `/api/v1/videos/${presigned.video.id}/complete`,
+        { method: 'POST' },
+      )
+      return toRecord(completed.video)
+    } catch (error) {
+      // The transfer or the confirmation failed — don't leave a zombie
+      // `processing` row (and its orphaned object) behind.
+      void apiFetch(`/api/v1/videos/${presigned.video.id}`, { method: 'DELETE' }).catch(() => {})
+      throw error
+    }
+  }
+
+  // Fallback: multipart through the API (local dev storage / older backend).
+  return uploadViaApi(file, onProgress)
+}
+
 async function readError(response: Response, fallback: string): Promise<string> {
   try {
     const body = await response.json()
@@ -163,6 +356,21 @@ async function readError(response: Response, fallback: string): Promise<string> 
     /* not JSON */
   }
   return fallback
+}
+
+/**
+ * Reserve a video from a pasted link and start the server-side import.
+ *
+ * The backend validates the URL (scheme + SSRF guard), reserves a
+ * `processing` row, and downloads + indexes the video in the background —
+ * exactly like an upload, so the same status-polling progress UI applies.
+ */
+export async function createVideoFromUrl(sourceUrl: string): Promise<VideoRecord> {
+  const data = await apiFetch<ApiVideo>('/api/v1/videos/from-url', {
+    method: 'POST',
+    body: JSON.stringify({ url: sourceUrl }),
+  })
+  return toRecord(data)
 }
 
 export async function removeVideo(userId: string, videoId: string): Promise<void> {
@@ -210,20 +418,41 @@ function revokeSource(videoId: string): void {
 }
 
 /**
- * An object URL for playback of a server video: downloads the file once via
- * the authenticated stream endpoint (the browser's `<video>` element cannot
- * send the bearer token itself) and caches the blob URL for this tab session.
+ * A playable source for a server video.
+ *
+ * Prefers the signed edge URL served by the Cloudflare streaming Worker
+ * (`worker: true`) — the browser streams it directly from the edge with
+ * Range support, so no bytes touch the API. Falls back to downloading the
+ * file once via the authenticated stream endpoint and caching a blob URL
+ * for this tab session.
  */
 export async function streamSourceFor(videoId: string): Promise<string> {
   const cached = objectUrls.get(videoId)
   if (cached) return cached
+
+  let edgeUrl: string | null = null
+  try {
+    const data = await apiFetch<{ url: string; worker: boolean }>(
+      `/api/v1/videos/${videoId}/stream-url`,
+    )
+    if (data.worker) edgeUrl = data.url
+  } catch {
+    // Older backend without stream-url — fall through to the blob path.
+  }
+
+  if (edgeUrl) {
+    // Signed URLs are short-lived; mint a fresh one each time rather than
+    // caching it for the whole session.
+    return edgeUrl
+  }
+
   const blob = await apiFetch<Blob>(`/api/v1/videos/${videoId}/stream`, {
     headers: { Accept: 'video/*' },
     parseBlob: true,
   })
-  const url = URL.createObjectURL(blob)
-  objectUrls.set(videoId, url)
-  return url
+  const blobUrl = URL.createObjectURL(blob)
+  objectUrls.set(videoId, blobUrl)
+  return blobUrl
 }
 
 /* ── Live library view ───────────────────────────────────── */
@@ -268,6 +497,200 @@ export function useVideos(userId: string | undefined): VideoRecord[] {
   }, [refresh, refreshTick])
 
   return videos
+}
+
+/* ── Search history ─────────────────────────────────────── */
+
+/**
+ * One past search: the prompt, the video it ran against, and the clips that
+ * came back. In server mode this lives in the `search_history` table; in demo
+ * mode it persists per user in localStorage (same split as the video library).
+ */
+export type SearchHistoryRecord = {
+  id: string
+  videoId: string
+  prompt: string
+  clips: Clip[]
+  /** True when the backend expanded the prompt into visual variants. */
+  expanded: boolean
+  /** Backend's minimum-similarity threshold for this search. */
+  minScore?: number
+  createdAt: string
+}
+
+/** Backend `SearchHistoryOut` shape (snake_case) — mapped to `SearchHistoryRecord`. */
+type ApiHistoryRecord = {
+  id: string
+  video_id: string
+  prompt: string
+  clips: {
+    id?: string
+    start: number
+    end: number
+    frame: number
+    score: number
+  }[]
+  expanded: boolean
+  min_score: number | null
+  created_at: string
+}
+
+const historyListeners = new Set<() => void>()
+
+function historyKey(userId: string): string {
+  return `vs.history.${userId}`
+}
+
+function emitHistory(): void {
+  for (const listener of historyListeners) listener()
+}
+
+function listHistoryLocal(userId: string): SearchHistoryRecord[] {
+  try {
+    const raw = localStorage.getItem(historyKey(userId))
+    const items = raw ? (JSON.parse(raw) as SearchHistoryRecord[]) : []
+    return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  } catch {
+    return []
+  }
+}
+
+function writeHistoryLocal(userId: string, items: SearchHistoryRecord[]): void {
+  try {
+    localStorage.setItem(historyKey(userId), JSON.stringify(items))
+  } catch {
+    // Quota exceeded — drop the clips (smallest loss; the prompt survives).
+    localStorage.setItem(
+      historyKey(userId),
+      JSON.stringify(items.map(({ clips: _clips, ...rest }) => rest)),
+    )
+  }
+  emitHistory()
+}
+
+function toHistoryRecord(item: ApiHistoryRecord): SearchHistoryRecord {
+  return {
+    id: item.id,
+    videoId: item.video_id,
+    prompt: item.prompt,
+    clips: item.clips.map((clip) => ({
+      id: clip.id ?? `${item.id}-${clip.frame}`,
+      videoId: item.video_id,
+      start: clip.start,
+      end: clip.end,
+      frame: clip.frame,
+      score: clip.score,
+    })),
+    expanded: item.expanded,
+    minScore: item.min_score ?? undefined,
+    createdAt: item.created_at,
+  }
+}
+
+/** The user's past searches, newest first. */
+export async function listHistory(userId: string): Promise<SearchHistoryRecord[]> {
+  if (API_ENABLED) {
+    const data = await apiFetch<{ items: ApiHistoryRecord[] }>('/api/v1/history')
+    return data.items
+      .map(toHistoryRecord)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  }
+  return listHistoryLocal(userId)
+}
+
+/**
+ * Remember a search the user just ran (fire-and-forget from the Search page).
+ *
+ * The clips are an immutable snapshot of what the UI showed, so history
+ * replays the exact result — not a re-rank against today's index.
+ */
+export async function saveSearchRecord(
+  userId: string,
+  record: Omit<SearchHistoryRecord, 'id' | 'createdAt'>,
+): Promise<void> {
+  if (API_ENABLED) {
+    await apiFetch('/api/v1/history', {
+      method: 'POST',
+      body: JSON.stringify({
+        video_id: record.videoId,
+        prompt: record.prompt,
+        clips: record.clips.map(({ id, start, end, frame, score }) => ({
+          id,
+          start,
+          end,
+          frame,
+          score,
+        })),
+        expanded: record.expanded,
+        min_score: record.minScore ?? null,
+      }),
+    })
+    emitHistory()
+    return
+  }
+
+  const entry: SearchHistoryRecord = {
+    id: crypto.randomUUID(),
+    videoId: record.videoId,
+    prompt: record.prompt,
+    clips: record.clips,
+    expanded: record.expanded,
+    minScore: record.minScore,
+    createdAt: new Date().toISOString(),
+  }
+  writeHistoryLocal(userId, [entry, ...listHistoryLocal(userId)])
+}
+
+export async function removeHistoryRecord(userId: string, recordId: string): Promise<void> {
+  if (API_ENABLED) {
+    await apiFetch(`/api/v1/history/${recordId}`, { method: 'DELETE' })
+  } else {
+    writeHistoryLocal(
+      userId,
+      listHistoryLocal(userId).filter((item) => item.id !== recordId),
+    )
+  }
+  emitHistory()
+}
+
+export async function clearHistory(userId: string): Promise<void> {
+  if (API_ENABLED) {
+    await apiFetch('/api/v1/history', { method: 'DELETE' })
+  } else {
+    writeHistoryLocal(userId, [])
+  }
+  emitHistory()
+}
+
+/**
+ * Live view of the user's search history; re-renders when a search is
+ * recorded or removed (via this tab or another one).
+ */
+export function useHistory(userId: string | undefined): SearchHistoryRecord[] {
+  const [records, setRecords] = useState<SearchHistoryRecord[]>([])
+
+  useEffect(() => {
+    const refresh = () => {
+      if (!userId) {
+        setRecords([])
+        return
+      }
+      void listHistory(userId)
+        .then(setRecords)
+        .catch(() => {
+          // Transient failure — keep the current view rather than blanking it.
+        })
+    }
+    refresh()
+    historyListeners.add(refresh)
+    window.addEventListener('storage', refresh)
+    return () => {
+      historyListeners.delete(refresh)
+      window.removeEventListener('storage', refresh)
+    }
+  }, [userId])
+
+  return records
 }
 
 /* ── Media helpers ──────────────────────────────────────── */

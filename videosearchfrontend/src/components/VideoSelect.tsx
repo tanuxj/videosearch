@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
 import type { VideoRecord } from '../lib/store'
+import { cn } from '../lib/cn'
 import { CheckIcon, ChevronIcon, FilmIcon, PlayIcon, UploadIcon } from './Icons'
 import { compactNumber, humanDuration } from '../lib/format'
 
@@ -9,6 +11,9 @@ type Props = {
   onSelect: (id: string) => void
   onUpload: () => void
 }
+
+const THUMB =
+  'grid size-9 shrink-0 place-items-center overflow-hidden rounded-lg border border-line bg-surface-sunk text-brand [&_svg]:size-4 [&_img]:size-full [&_img]:object-cover'
 
 export function VideoSelect({ videos, selectedId, onSelect, onUpload }: Props) {
   const [open, setOpen] = useState(false)
@@ -32,24 +37,32 @@ export function VideoSelect({ videos, selectedId, onSelect, onUpload }: Props) {
   }, [open])
 
   return (
-    <div className="vselect" ref={rootRef}>
+    <div className="relative min-w-0 flex-1" ref={rootRef}>
       <button
         type="button"
-        className={`vselect-trigger${open ? ' is-open' : ''}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
+        className={cn(
+          'flex w-full items-center gap-2.5 rounded-xl border bg-panel px-2.5 py-2 text-left',
+          'transition-[border-color,background-color] duration-150',
+          open
+            ? 'border-brand bg-brand-wash/40'
+            : 'border-line hover:border-line-strong hover:bg-surface-soft',
+        )}
       >
-        <span className="vselect-thumb">
+        <span className={THUMB}>
           {selected?.poster ? (
             <img src={selected.poster} alt="" />
           ) : (
             <FilmIcon />
           )}
         </span>
-        <span className="vselect-text">
-          <b>{selected ? selected.name : 'Select a video'}</b>
-          <span>
+        <span className="min-w-0 flex-1">
+          <b className="block truncate text-[13.5px] font-semibold text-ink">
+            {selected ? selected.name : 'Select a video'}
+          </b>
+          <span className="block truncate text-[11.5px] text-ink-faint">
             {selected
               ? `${humanDuration(selected.duration)} · ${compactNumber(selected.frames)} frames indexed`
               : videos.length === 0
@@ -57,58 +70,95 @@ export function VideoSelect({ videos, selectedId, onSelect, onUpload }: Props) {
                 : `${videos.length} videos ready`}
           </span>
         </span>
-        <ChevronIcon />
+        <span
+          className={cn(
+            'shrink-0 text-ink-faint transition-transform duration-200 [&_svg]:size-4',
+            open && 'rotate-180',
+          )}
+        >
+          <ChevronIcon />
+        </span>
       </button>
 
-      {open && (
-        <div className="vselect-menu" role="listbox">
-          {videos.length > 0 && (
-            <p className="vselect-label">Indexed videos</p>
-          )}
-          {videos.map((video) => (
-            <button
-              key={video.id}
-              type="button"
-              role="option"
-              aria-selected={video.id === selectedId}
-              className={`vselect-option${video.id === selectedId ? ' is-selected' : ''}`}
-              onClick={() => {
-                onSelect(video.id)
-                setOpen(false)
-              }}
-            >
-              <span className="vselect-thumb">
-                {video.poster ? <img src={video.poster} alt="" /> : <PlayIcon />}
-              </span>
-              <span className="vselect-text">
-                <b>{video.name}</b>
-                <span>
-                  {humanDuration(video.duration)} ·{' '}
-                  {compactNumber(video.frames)} frames
-                  {video.status === 'processing' && ' · indexing'}
-                </span>
-              </span>
-              {video.id === selectedId && (
-                <span className="vselect-check">
-                  <CheckIcon />
-                </span>
-              )}
-            </button>
-          ))}
-
-          <button
-            type="button"
-            className="vselect-add"
-            onClick={() => {
-              setOpen(false)
-              onUpload()
-            }}
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            role="listbox"
+            initial={{ opacity: 0, y: -4, scale: 0.99 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -4, scale: 0.99 }}
+            transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+            className="absolute top-[calc(100%+6px)] left-0 z-50 max-h-[340px] w-full min-w-[280px] overflow-y-auto rounded-xl border border-line bg-panel p-1.5 shadow-[0_12px_28px_-12px_rgba(16,19,26,0.18)]"
           >
-            <UploadIcon />
-            Upload a new video
-          </button>
-        </div>
-      )}
+            {videos.length > 0 && (
+              <p className="px-2 pt-1 pb-1.5 text-[11px] font-semibold tracking-[0.07em] text-ink-faint uppercase">
+                Indexed videos
+              </p>
+            )}
+            {videos.map((video) => {
+              const isSelected = video.id === selectedId
+              return (
+                <button
+                  key={video.id}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  onClick={() => {
+                    onSelect(video.id)
+                    setOpen(false)
+                  }}
+                  className={cn(
+                    'flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors',
+                    isSelected
+                      ? 'bg-brand-wash'
+                      : 'hover:bg-surface-sunk',
+                  )}
+                >
+                  <span className={THUMB}>
+                    {video.poster ? (
+                      <img src={video.poster} alt="" />
+                    ) : (
+                      <PlayIcon />
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <b
+                      className={cn(
+                        'block truncate text-[13px] font-medium',
+                        isSelected ? 'text-brand' : 'text-ink',
+                      )}
+                    >
+                      {video.name}
+                    </b>
+                    <span className="block truncate text-[11px] text-ink-faint">
+                      {humanDuration(video.duration)} ·{' '}
+                      {compactNumber(video.frames)} frames
+                      {video.status === 'processing' && ' · indexing'}
+                    </span>
+                  </span>
+                  {isSelected && (
+                    <span className="shrink-0 text-brand [&_svg]:size-4">
+                      <CheckIcon />
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false)
+                onUpload()
+              }}
+              className="mt-1 flex w-full items-center gap-2 rounded-lg border-t border-line px-2 py-2 text-[13px] font-medium text-brand transition-colors hover:bg-brand-wash [&_svg]:size-4"
+            >
+              <UploadIcon />
+              Upload a new video
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

@@ -79,20 +79,108 @@ class Settings(BaseSettings):
     # Tests force "local" so they never touch the real bucket.
     storage_backend: Literal["r2", "local", "auto"] = "auto"
 
+    # How long a presigned direct-upload URL stays valid (seconds). Large
+    # files can take a while to push from the browser to the bucket.
+    presign_url_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
+
+    # Hard ceiling on a single video upload (bytes). The browser streams
+    # straight to storage on the presigned path, so this mainly protects the
+    # multipart fallback (which buffers through the API). Files above 5 GiB go
+    # through R2's presigned multipart upload automatically — see
+    # `POST /videos/presign/multipart`.
+    max_upload_bytes: int = Field(default=10 * 1024**3, ge=1)
+
     # Local fallback storage for when R2 is not configured.
     upload_dir: Path = PROJECT_ROOT / "data" / "uploads"
+
+    # ── Edge streaming (Cloudflare Worker) ──────────────────────
+    # When `stream_worker_base_url` is set, `GET /videos/{id}/stream-url`
+    # returns a short-lived HMAC-signed URL served by the edge Worker
+    # (videosearchworker/) instead of proxying video bytes through the API.
+    # `stream_signing_secret` must match the Worker's STREAM_SIGN_SECRET.
+    stream_worker_base_url: str | None = None
+    stream_signing_secret: str = ""
+    stream_url_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
 
     # ── Indexing pipeline ───────────────────────────────────────
     # CLIP variant used to embed frames and prompts. Hugging Face model id
     # for sentence-transformers; downloads to the HF cache on first use.
     clip_model_name: str = "clip-ViT-B-32"
+    # "onnx" runs the CLIP vision tower through onnxruntime (~1.4x faster on
+    # CPU, identical vectors, lighter load); "torch" keeps the classic eager
+    # path. Falls back to torch automatically if the export fails.
+    clip_backend: Literal["onnx", "torch"] = "onnx"
+    # Load CLIP at startup on a background thread rather than on the first
+    # upload/search. Tests turn this off so they don't pull ~1.2 GB of weights.
+    prewarm_clip_model: bool = True
     # Start the indexing job automatically on upload. Tests flip this off
     # so uploads stay `processing` until the test runs the pipeline itself.
     index_on_upload: bool = True
     # Frames are sampled at this interval (seconds). 1.0 = one frame per second.
     frame_interval_seconds: float = 1.0
+    # Scene-aware sampling: a sampled frame is embedded only when its picture
+    # actually changed versus the last kept frame, so long static-heavy files
+    # (movies, talks) index a fraction of the frames with no real search loss.
+    # A frame is kept when its mean absolute pixel difference (0–255, measured
+    # on a small grayscale proxy) reaches `scene_threshold`, or when
+    # `scene_max_gap_seconds` have passed since the last keep (so slow pans and
+    # zooms still contribute frames). Set `scene_aware_sampling` to false for
+    # the old fixed-rate behaviour.
+    scene_aware_sampling: bool = True
+    scene_threshold: float = Field(default=8.0, ge=0.0, le=255.0)
+    scene_max_gap_seconds: float = Field(default=6.0, ge=0.5, le=3600.0)
     # Rows per batch when writing embeddings to Postgres.
     index_batch_size: int = 128
+
+    # ── Semantic search ────────────────────────────────────────
+    # Minimum cosine similarity (0–1) between the prompt embedding and a frame
+    # for it to count as a match. CLIP's text↔image similarity for unrelated
+    # content clusters around 0.2, so 0.24 is a safe floor for real matches;
+    # below it a search returns zero scenes instead of the video's least-bad
+    # frames. Raise it for stricter results, lower it if real matches are
+    # being missed on your footage.
+    search_min_similarity: float = Field(default=0.24, ge=0.0, le=1.0)
+    # Consecutive matching frames closer than this (seconds) are merged into a
+    # single scene, so a multi-second moment reads as one clip with a real
+    # start and end rather than several overlapping single-frame windows.
+    search_merge_window_seconds: float = Field(default=2.0, ge=0.0)
+
+    # ── LLM query expansion (the "middleman") ──────────────────
+    # CLIP matches best when text names what's visible — objects, setting,
+    # colours, action. Terse or broken-English prompts embed poorly. When
+    # `llm_api_key` is set, each search prompt is rewritten + expanded by an
+    # OpenAI-compatible chat model into a few visually-grounded variants, and
+    # every variant is embedded (per-frame similarity = the best of them), so
+    # vague phrasing still lands. Without a key, the raw prompt is used as-is.
+    llm_api_key: str | None = None
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_model: str = "gpt-4o-mini"
+    # How many extra expanded variants to generate (on top of the raw prompt).
+    llm_expand_prompts: int = Field(default=2, ge=0, le=5)
+    llm_timeout_seconds: float = Field(default=15.0, ge=1.0, le=120.0)
+
+    # ── URL import (paste-a-link) ───────────────────────────────
+    # Let users index videos by pasting a URL (YouTube, Twitch, Zoom,
+    # Vimeo, or a direct video file link). The backend downloads the video
+    # with yt-dlp (or a plain HTTP download for direct file URLs), stores it
+    # like an upload, then runs the normal indexing pipeline.
+    url_import_enabled: bool = True
+    # Cap on a URL-downloaded video (bytes). Defaults to the same 10 GiB
+    # ceiling as file uploads — the user chose no separate cap.
+    url_import_max_bytes: int = Field(default=10 * 1024**3, ge=1)
+    # yt-dlp format preference. A single progressive MP4 plays in browsers
+    # without an ffmpeg merge step; anything else is a fallback (webm plays,
+    # mkv indexes but may not play back in the app).
+    url_import_format: str = "b[ext=mp4]/b"
+    # How long the pre-download metadata probe (yt-dlp extract_info) may run
+    # before the request fails. Keeps a slow or unresponsive site from
+    # hanging the paste-a-link call.
+    url_import_probe_timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    # SSRF guard: URLs whose host resolves to a private/loopback/link-local
+    # address are rejected so the backend cannot be made to fetch internal
+    # services. Tests flip this on so they can point imports at a local
+    # fixture server.
+    url_import_allow_private: bool = False
 
     # ── Postgres database (spawned by docker-compose) ────────────
     # The compose stack passes these to the container; when running the

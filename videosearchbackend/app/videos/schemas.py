@@ -26,3 +26,97 @@ class VideoOut(BaseModel):
 class VideoListOut(BaseModel):
     items: list[VideoOut]
     count: int = Field(description="Number of videos returned.")
+
+
+class StreamUrlOut(BaseModel):
+    """A playback URL for a video.
+
+    `worker=true` means the URL points at the edge streaming Worker and is
+    signed (short-lived); `worker=false` is the classic API-proxied stream.
+    """
+
+    url: str
+    worker: bool
+
+
+class UrlImportIn(BaseModel):
+    """A link to a video to download and index.
+
+    Accepts YouTube/Twitch/Zoom/Vimeo links (resolved with yt-dlp) or a
+    direct video file URL. Scheme and host are validated server-side (SSRF
+    guard) before anything is downloaded.
+    """
+
+    url: str = Field(
+        min_length=1,
+        max_length=2048,
+        examples=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+    )
+
+
+class PresignUploadIn(BaseModel):
+    """Metadata for a direct-to-storage upload.
+
+    The file bytes never touch the API — it only validates the request and
+    mints a presigned PUT URL for the browser to upload to.
+    """
+
+    filename: str
+    size_bytes: int = Field(ge=0)
+    content_type: str | None = None
+
+
+class PresignUploadOut(BaseModel):
+    """A reserved video plus the URL to PUT its file at.
+
+    `upload_url` is None when the storage backend cannot presign (local
+    disk) — clients then fall back to the classic multipart upload.
+    """
+
+    video: VideoOut
+    upload_url: str | None
+    expires_in: int = Field(description="Seconds the upload URL stays valid.")
+
+
+class MultipartPartOut(BaseModel):
+    """One presigned PUT URL for a single chunk of a multipart upload."""
+
+    part_number: int
+    url: str
+
+
+class PresignMultipartOut(BaseModel):
+    """A reserved video plus per-chunk URLs for a multipart upload.
+
+    Used for files larger than the 5 GiB single-PUT cap: the browser slices
+    the file into `part_size`-byte chunks, PUTs each to its own URL (reusing
+    the same authentication the API mints), then calls
+    `POST /videos/{id}/complete/multipart` with the returned ETags.
+    """
+
+    video: VideoOut
+    upload_id: str
+    part_size: int = Field(description="Chunk size in bytes; the last chunk may be smaller.")
+    parts: list[MultipartPartOut]
+    expires_in: int = Field(description="Seconds the part URLs stay valid.")
+
+
+class MultipartPartIn(BaseModel):
+    """An uploaded chunk, as returned in the PUT response's ETag header."""
+
+    part_number: int = Field(ge=1)
+    etag: str = Field(min_length=1)
+
+
+class CompleteMultipartIn(BaseModel):
+    """Chunks to assemble into the final object."""
+
+    upload_id: str = Field(min_length=1)
+    parts: list[MultipartPartIn] = Field(min_length=1)
+
+
+class CompleteUploadOut(BaseModel):
+    """Result of confirming a presigned upload."""
+
+    video: VideoOut
+    message: str = "Upload confirmed — indexing started"
