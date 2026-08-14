@@ -357,6 +357,21 @@ async function readError(response: Response, fallback: string): Promise<string> 
   return fallback
 }
 
+/**
+ * Reserve a video from a pasted link and start the server-side import.
+ *
+ * The backend validates the URL (scheme + SSRF guard), reserves a
+ * `processing` row, and downloads + indexes the video in the background —
+ * exactly like an upload, so the same status-polling progress UI applies.
+ */
+export async function createVideoFromUrl(sourceUrl: string): Promise<VideoRecord> {
+  const data = await apiFetch<ApiVideo>('/api/v1/videos/from-url', {
+    method: 'POST',
+    body: JSON.stringify({ url: sourceUrl }),
+  })
+  return toRecord(data)
+}
+
 export async function removeVideo(userId: string, videoId: string): Promise<void> {
   if (API_ENABLED) {
     await apiFetch(`/api/v1/videos/${videoId}`, { method: 'DELETE' })

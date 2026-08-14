@@ -28,6 +28,18 @@ MAX_UPLOAD_BYTES = get_settings().max_upload_bytes
 # anything else before a single byte hits storage.
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 
+# Content types for the containers the pipeline can index. Used when storing
+# and streaming a video; URL imports pick from the same map so an imported
+# file streams with the right type.
+MEDIA_TYPES = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
+    ".m4v": "video/x-m4v",
+}
+
 
 class VideoError(Exception):
     """Base class for video library failures."""
@@ -152,6 +164,50 @@ async def create_video(
     await db.refresh(video)
     logger.info("Video uploaded: %s (%d bytes, status=processing)", video.id, size_bytes)
     return video, staged_path
+
+
+def display_name(title: str, ext: str) -> str:
+    """A user-facing name from a download title and container extension.
+
+    Truncated like every other stored name. Avoids doubling the extension
+    when the title already carries it (direct file probes name the file after
+    the URL path, e.g. "clip.mp4").
+    """
+    name = (title or "video").strip() or "video"
+    ext = (ext or "").lower().lstrip(".")
+    if ext and not name.lower().endswith(f".{ext}"):
+        name = f"{name}.{ext}"
+    return _safe_name(name)
+
+
+async def create_url_video(
+    db: AsyncSession,
+    *,
+    owner_id: uuid.UUID,
+    title: str,
+    ext: str,
+) -> Video:
+    """Reserve a `processing` video row for a URL import.
+
+    The storage key uses the extension the metadata probe reported; the
+    background download adjusts it if the real container differs (nothing has
+    been stored under the key yet). `size_bytes` starts at 0 and is filled in
+    once the download lands.
+    """
+    ext = (ext or "mp4").lower().lstrip(".") or "mp4"
+    video_id = uuid.uuid4()
+    video = Video(
+        owner_id=owner_id,
+        name=display_name(title, ext),
+        size_bytes=0,
+        status="processing",
+        storage_key=object_key(owner_id, video_id, ext),
+    )
+    db.add(video)
+    await db.commit()
+    await db.refresh(video)
+    logger.info("Video reserved for URL import: %s (ext=%s)", video.id, ext)
+    return video
 
 
 async def create_pending_video(

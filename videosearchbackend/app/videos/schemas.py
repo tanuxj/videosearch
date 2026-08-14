@@ -39,6 +39,21 @@ class StreamUrlOut(BaseModel):
     worker: bool
 
 
+class UrlImportIn(BaseModel):
+    """A link to a video to download and index.
+
+    Accepts YouTube/Twitch/Zoom/Vimeo links (resolved with yt-dlp) or a
+    direct video file URL. Scheme and host are validated server-side (SSRF
+    guard) before anything is downloaded.
+    """
+
+    url: str = Field(
+        min_length=1,
+        max_length=2048,
+        examples=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+    )
+
+
 class PresignUploadIn(BaseModel):
     """Metadata for a direct-to-storage upload.
 

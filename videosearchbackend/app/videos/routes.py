@@ -1,10 +1,13 @@
-"""Video routes: upload, list, status, stream, clip, delete.
+"""Video routes: upload, URL import, list, status, stream, clip, delete.
 
 Upload is the entry point of the indexing pipeline: it stores the file, opens
 a `processing` video row, and enqueues the background job that extracts and
-embeds frames.
+embeds frames. `POST /videos/from-url` does the same for a pasted link — the
+background job downloads the video (yt-dlp for YouTube/Twitch/Zoom, a plain
+HTTP fetch for direct file URLs) before running the identical pipeline.
 """
 
+import asyncio
 import math
 import shutil
 import tempfile
@@ -30,7 +33,7 @@ from starlette.background import BackgroundTask
 from app.auth.deps import CurrentUser, DbSession
 from app.auth.schemas import MessageResponse
 from app.core.config import get_settings
-from app.videos import clips, pipeline
+from app.videos import clips, pipeline, url_import
 from app.videos import service as videos_service
 from app.videos.schemas import (
     CompleteMultipartIn,
@@ -40,6 +43,7 @@ from app.videos.schemas import (
     PresignUploadIn,
     PresignUploadOut,
     StreamUrlOut,
+    UrlImportIn,
     VideoListOut,
     VideoOut,
 )
@@ -99,15 +103,6 @@ settings = get_settings()
 
 router = APIRouter(prefix="/videos", tags=["videos"])
 
-_MEDIA_TYPES = {
-    ".mp4": "video/mp4",
-    ".mov": "video/quicktime",
-    ".webm": "video/webm",
-    ".mkv": "video/x-matroska",
-    ".avi": "video/x-msvideo",
-    ".m4v": "video/x-m4v",
-}
-
 
 @router.post(
     "",
@@ -162,6 +157,68 @@ async def upload_video(
     elif staged_path is not None:
         # Nothing will consume it, so don't leave it in the temp dir.
         staged_path.unlink(missing_ok=True)
+    return VideoOut.model_validate(video)
+
+
+@router.post(
+    "/from-url",
+    response_model=VideoOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Index a video from a URL",
+    description=(
+        "Reserves a `processing` video row and starts a background job that "
+        "downloads the video at the given link (YouTube, Twitch, Zoom, Vimeo "
+        "or any direct video file URL), stores it like an upload, then runs "
+        "the normal indexing pipeline. The URL is validated for scheme and "
+        "SSRF (private hosts are refused) before the job starts."
+    ),
+    responses={
+        409: {"description": "URL import disabled, or a duplicate is in flight"},
+        422: {"description": "The URL is invalid or could not be read as a video"},
+    },
+)
+async def import_from_url(
+    user: CurrentUser,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
+    payload: UrlImportIn,
+) -> VideoOut:
+    if not settings.url_import_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="URL import is disabled on this server.",
+        )
+
+    try:
+        # Both are network-bound (DNS resolution + yt-dlp metadata fetch);
+        # keep them off the event loop. Probe is capped so a slow or
+        # unresponsive site fails the request instead of hanging it.
+        url = await run_in_threadpool(url_import.validate_url, payload.url)
+        info = await asyncio.wait_for(
+            run_in_threadpool(
+                url_import.probe_url,
+                url,
+                max_bytes=settings.url_import_max_bytes,
+            ),
+            timeout=settings.url_import_probe_timeout_seconds,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Timed out reading that link as a video — check the URL and try again.",
+        ) from exc
+    except url_import.UrlImportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    video = await videos_service.create_url_video(
+        db,
+        owner_id=user.id,
+        title=info["title"],
+        ext=info["ext"],
+    )
+    # Fire-and-forget: the response returns immediately with status
+    # `processing`; download + indexing run to completion in the background.
+    background_tasks.add_task(url_import.import_video, video.id, url)
     return VideoOut.model_validate(video)
 
 
@@ -521,7 +578,7 @@ async def stream_video(
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
     ext = f".{video.storage_key.rsplit('.', 1)[-1].lower()}"
-    media_type = _MEDIA_TYPES.get(ext)
+    media_type = videos_service.MEDIA_TYPES.get(ext)
     return storage.stream_response(video.storage_key, media_type, request.headers.get("range"))
 
 

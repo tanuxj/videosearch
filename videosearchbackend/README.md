@@ -55,6 +55,36 @@ Settings are loaded from `.env` (see `.env.example`) via pydantic-settings in
 | `POSTGRES_DB`   | `videosearch`                               | Postgres database name       |
 | `POSTGRES_USER` | `videosearch`                               | Postgres user                |
 | `POSTGRES_PASSWORD` | `videosearch`                          | Postgres password (override in `.env`!) |
+| `URL_IMPORT_ENABLED` | `true`                                     | Allow indexing videos from pasted URLs |
+| `URL_IMPORT_MAX_BYTES` | `10737418240` (10 GiB)              | Cap on a URL-downloaded video |
+| `URL_IMPORT_FORMAT` | `b[ext=mp4]/b`                           | yt-dlp format preference (progressive MP4 first) |
+| `URL_IMPORT_ALLOW_PRIVATE` | `false`                         | SSRF guard — set `true` to allow private/local hosts (tests only!) |
+
+## URL import (paste-a-link)
+
+Users can index a video from a pasted link instead of uploading a file:
+
+| Method | Route                   | Auth | Purpose                                        |
+| ------ | ----------------------- | ---- | ---------------------------------------------- |
+| POST   | `/api/v1/videos/from-url` | bearer | Validate the URL, reserve a `processing` video, and start the background download + index |
+
+`POST /api/v1/videos/from-url` with `{"url": "https://…"}`:
+
+1. Validates the link — `http(s)` only, and the host must resolve to a
+   **public** address (SSRF guard; `URL_IMPORT_ALLOW_PRIVATE=true` lifts it
+   for tests).
+2. Probes it with **yt-dlp** (YouTube, Twitch, Zoom, Vimeo, …) or a plain
+   HTTP probe for direct file URLs — rejecting live streams, audio-only
+   links, and anything over the size cap.
+3. Reserves a `processing` video row, then downloads the video in the
+   background (yt-dlp first, direct HTTP fallback), stores it in the same
+   storage as uploads, and runs the normal indexing pipeline — so streaming,
+   clip downloads and scene search all work exactly like an uploaded file.
+
+Caveats: downloading YouTube videos can violate their ToS and some videos
+are throttled/geo-blocked; Zoom recordings usually require login; live
+streams have no end point and can't be indexed. The backend needs outbound
+internet access.
 
 > `CORS_ORIGINS` already allows the Vite frontend (port 5174) — no extra setup
 > needed to call this API from the browser.

@@ -5,6 +5,7 @@ import {
   attachSource,
   captureFrames,
   createVideoApi,
+  createVideoFromUrl,
   getVideo,
   readVideoDuration,
   saveVideo,
@@ -17,7 +18,7 @@ import { cn } from '../lib/cn'
 import { Alert, Spinner } from './AuthLayout'
 import { Button } from './ui/Button'
 import { Chip } from './ui/Data'
-import { CheckIcon, PlayIcon, SearchIcon, UploadIcon } from './Icons'
+import { CheckIcon, LinkIcon, PlayIcon, SearchIcon, UploadIcon } from './Icons'
 import { compactNumber, fileSize, humanDuration } from '../lib/format'
 
 /**
@@ -38,8 +39,16 @@ const UPLOAD_SHARE = 30
  * UI had to guess which one was "current", and it guessed wrong. One honest
  * indexing step with a real frame count beats three invented ones.
  */
-const STAGES = [
+const FILE_STAGES = [
   { label: 'Uploading file' },
+  { label: 'Indexing frames (1 fps)' },
+  { label: 'Ready to search' },
+]
+
+// URL imports swap the first stage for the server-side download — the client
+// has no bytes to count, so it holds here until the first frames appear.
+const URL_STAGES = [
+  { label: 'Downloading video' },
   { label: 'Indexing frames (1 fps)' },
   { label: 'Ready to search' },
 ]
@@ -74,8 +83,17 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
   const [progress, setProgress] = useState(0)
   const [stage, setStage] = useState(0)
   const [done, setDone] = useState(false)
+  /** Which way the video enters the library: file upload or pasted link. */
+  const [mode, setMode] = useState<'file' | 'url'>('file')
+  const [urlInput, setUrlInput] = useState('')
   /** Seconds remaining, once enough frames have landed to estimate a rate. */
   const [eta, setEta] = useState<number | null>(null)
+
+  // URL imports hold on the transfer stage while the server downloads the
+  // video — there are no client-side bytes to count, so the bar reads as an
+  // indeterminate pulse instead of a fake percentage.
+  const downloading = mode === 'url' && stage === 0 && !done
+  const stages = mode === 'url' ? URL_STAGES : FILE_STAGES
 
   useEffect(() => {
     aliveRef.current = true
@@ -93,26 +111,44 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       setStage(0)
       setDone(false)
       setError('')
+      setMode('file')
+      setUrlInput('')
     }, 200)
     return () => clearTimeout(timer)
   }, [open])
 
-  /** Server mode: upload the file, then poll until the pipeline finishes. */
-  async function ingestServer(file: File): Promise<void> {
+  /**
+   * Server mode: start an import (file upload or URL download), then poll
+   * until the pipeline finishes.
+   *
+   * `create` performs the transfer and resolves with the `processing` record
+   * the server owns. For a file that means the upload is complete when it
+   * resolves; for a URL it resolves as soon as the row is reserved while the
+   * download still runs server-side — so the dialog holds on the transfer
+   * stage until the first frames appear.
+   */
+  async function ingestServer(
+    create: (onProgress: (loaded: number, total: number) => void) => Promise<VideoRecord>,
+    isUrl: boolean,
+  ): Promise<void> {
     if (!user) return
     setStage(0)
     setProgress(0)
 
-    // Stage 0 — the transfer, the one phase with an exact byte count.
-    const record = await createVideoApi(file, (loaded, total) => {
+    // Stage 0 — the transfer, the one phase with an exact byte count. URL
+    // imports have no client-side bytes (the server downloads them), so
+    // `isUrl` skips the immediate advance to the indexing stage.
+    const record = await create((loaded, total) => {
       if (!aliveRef.current) return
       const fraction = total > 0 ? loaded / total : 1
       setProgress(Math.round(UPLOAD_SHARE * fraction))
     })
     if (!aliveRef.current) return
-    setStage(1)
-    setProgress(UPLOAD_SHARE)
     setVideo(record) // server owns the record — nothing to persist locally
+    if (!isUrl) {
+      setStage(1)
+      setProgress(UPLOAD_SHARE)
+    }
 
     // Stage 1 — poll until the backend reports ready (or failed).
     //
@@ -123,6 +159,10 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     let current = record
     let lastFrames = -1
     let lastChange = Date.now()
+    // A file upload is done when `create` resolves. A URL import is not:
+    // `frames_total` stays 0 until the download lands, so the transfer stage
+    // holds (and the stall clock doesn't start) until then.
+    let indexingStarted = !isUrl
     const startedAt = Date.now()
 
     while (aliveRef.current) {
@@ -138,14 +178,20 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
         )
       }
 
-      if (current.frames !== lastFrames) {
-        lastFrames = current.frames
-        lastChange = Date.now()
-      }
-
       // `frames_total` is 0 until the server has probed the file. Hold at the
       // start of the indexing band rather than dividing by zero.
       if (current.framesTotal > 0) {
+        if (!indexingStarted) {
+          // URL mode: the download finished and indexing has begun.
+          indexingStarted = true
+          setStage(1)
+          setProgress(UPLOAD_SHARE)
+          lastChange = Date.now()
+        }
+        if (current.frames !== lastFrames) {
+          lastFrames = current.frames
+          lastChange = Date.now()
+        }
         const ratio = Math.min(1, current.frames / current.framesTotal)
         setProgress(UPLOAD_SHARE + (100 - UPLOAD_SHARE) * ratio)
         // A rate needs a few seconds of history to mean anything.
@@ -159,8 +205,10 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
 
       // Bound on *silence*, not on total time: a two-hour film legitimately
       // takes many minutes, and the old 300-second cap failed those uploads
-      // with "taking longer than expected" while they were working fine.
-      if (Date.now() - lastChange > STALL_LIMIT_MS) {
+      // with "taking longer than expected" while they were working fine. The
+      // clock only starts once indexing produces frames — a long download
+      // must not trip it.
+      if (indexingStarted && Date.now() - lastChange > STALL_LIMIT_MS) {
         throw new Error(
           'Indexing has stopped responding. It may still finish — check your library in a few minutes.',
         )
@@ -269,11 +317,31 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     }
 
     try {
-      if (API_ENABLED) await ingestServer(file)
-      else await ingestDemo(file)
+      if (API_ENABLED) {
+        await ingestServer((onProgress) => createVideoApi(file, onProgress), false)
+      } else {
+        await ingestDemo(file)
+      }
     } catch (caught) {
       if (!aliveRef.current) return
       setError(caught instanceof Error ? caught.message : 'Upload failed.')
+    }
+  }
+
+  /** URL mode: validate the link client-side, then let the server download it. */
+  async function ingestUrl() {
+    if (!user) return
+    const trimmed = urlInput.trim()
+    if (!/^https?:\/\//i.test(trimmed)) {
+      setError('Paste a full link starting with http:// or https://.')
+      return
+    }
+    setError('')
+    try {
+      await ingestServer(() => createVideoFromUrl(trimmed), true)
+    } catch (caught) {
+      if (!aliveRef.current) return
+      setError(caught instanceof Error ? caught.message : 'Import failed.')
     }
   }
 
@@ -299,6 +367,33 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
         )}
 
         {!video ? (
+          <div className="flex flex-col gap-4">
+            {API_ENABLED && (
+              <div className="flex gap-1 rounded-xl border border-line bg-surface-soft p-1">
+                {(
+                  [
+                    { key: 'file', label: 'Upload a file' },
+                    { key: 'url', label: 'Paste a link' },
+                  ] as const
+                ).map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setMode(tab.key)}
+                    className={cn(
+                      'flex-1 rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors',
+                      mode === tab.key
+                        ? 'bg-panel text-ink shadow-sm'
+                        : 'text-ink-faint hover:text-ink',
+                    )}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+          {mode === 'file' ? (
           <div
             onDragOver={(event) => {
               event.preventDefault()
@@ -353,6 +448,46 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
               }}
             />
           </div>
+          ) : (
+            <div className="flex flex-col items-center rounded-xl border-2 border-dashed px-6 py-8 text-center">
+              <span className="mb-4 grid size-12 place-items-center rounded-full border border-brand-line bg-brand-wash text-brand [&_svg]:size-6">
+                <LinkIcon />
+              </span>
+              <h3 className="text-[17px] font-semibold tracking-[-0.02em] text-ink">
+                Paste a video link
+              </h3>
+              <p className="mt-2 max-w-[48ch] text-[13.5px] leading-relaxed text-ink-dim">
+                YouTube, Twitch, Zoom, Vimeo — or any direct video file URL.
+                We’ll download it, index every frame, and make it searchable
+                like an upload.
+              </p>
+              <input
+                value={urlInput}
+                onChange={(event) => setUrlInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && urlInput.trim()) {
+                    event.preventDefault()
+                    void ingestUrl()
+                  }
+                }}
+                placeholder="https://www.youtube.com/watch?v=…"
+                aria-label="Video URL"
+                className="mt-5 w-full rounded-lg border border-line-strong bg-panel px-3.5 py-2.5 text-[14px] text-ink outline-none placeholder:text-ink-faint focus:border-brand"
+              />
+              <Button
+                onClick={() => void ingestUrl()}
+                disabled={!urlInput.trim()}
+                className="mt-4 [&_svg]:size-4"
+              >
+                <LinkIcon />
+                Start indexing
+              </Button>
+              <p className="mt-3 text-[12px] text-ink-faint">
+                Live streams and private recordings can’t be indexed.
+              </p>
+            </div>
+          )}
+          </div>
         ) : (
           <>
             <div className="flex items-center gap-3 rounded-xl border border-line bg-surface-soft p-3">
@@ -381,11 +516,19 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                     ` · ${framesLabel(video.framesTotal)} to index`}
                 </span>
                 {/* Progress track is a lighter step of the fill's own hue, so
-                    the bar reads as one scale rather than fill-on-grey. */}
+                    the bar reads as one scale rather than fill-on-grey. While
+                    a URL import downloads there are no client-side bytes to
+                    count, so the fill pulses at the transfer share instead of
+                    pretending to be a real percentage. */}
                 <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-brand-wash">
                   <i
-                    className="block h-full rounded-full bg-brand transition-[width] duration-300"
-                    style={{ width: `${progress}%` }}
+                    className={cn(
+                      'block h-full rounded-full bg-brand transition-[width] duration-300',
+                      downloading && 'animate-pulse',
+                    )}
+                    style={{
+                      width: downloading ? `${UPLOAD_SHARE}%` : `${progress}%`,
+                    }}
                   />
                 </div>
               </div>
@@ -394,7 +537,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
               ) : (
                 <div className="shrink-0 text-right">
                   <span className="block text-[12.5px] font-semibold text-brand">
-                    {Math.round(progress)}%
+                    {downloading ? '…' : `${Math.round(progress)}%`}
                   </span>
                   {eta !== null && (
                     <span className="block text-[11px] text-ink-faint">
@@ -406,7 +549,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
             </div>
 
             <div className="mt-4 flex flex-col gap-0.5">
-              {STAGES.map((item, index) => {
+              {stages.map((item, index) => {
                 const complete = done || index < stage
                 const active = !done && index === stage
                 return (

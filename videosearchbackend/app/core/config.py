@@ -159,6 +159,29 @@ class Settings(BaseSettings):
     llm_expand_prompts: int = Field(default=2, ge=0, le=5)
     llm_timeout_seconds: float = Field(default=15.0, ge=1.0, le=120.0)
 
+    # ── URL import (paste-a-link) ───────────────────────────────
+    # Let users index videos by pasting a URL (YouTube, Twitch, Zoom,
+    # Vimeo, or a direct video file link). The backend downloads the video
+    # with yt-dlp (or a plain HTTP download for direct file URLs), stores it
+    # like an upload, then runs the normal indexing pipeline.
+    url_import_enabled: bool = True
+    # Cap on a URL-downloaded video (bytes). Defaults to the same 10 GiB
+    # ceiling as file uploads — the user chose no separate cap.
+    url_import_max_bytes: int = Field(default=10 * 1024**3, ge=1)
+    # yt-dlp format preference. A single progressive MP4 plays in browsers
+    # without an ffmpeg merge step; anything else is a fallback (webm plays,
+    # mkv indexes but may not play back in the app).
+    url_import_format: str = "b[ext=mp4]/b"
+    # How long the pre-download metadata probe (yt-dlp extract_info) may run
+    # before the request fails. Keeps a slow or unresponsive site from
+    # hanging the paste-a-link call.
+    url_import_probe_timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    # SSRF guard: URLs whose host resolves to a private/loopback/link-local
+    # address are rejected so the backend cannot be made to fetch internal
+    # services. Tests flip this on so they can point imports at a local
+    # fixture server.
+    url_import_allow_private: bool = False
+
     # ── Postgres database (spawned by docker-compose) ────────────
     # The compose stack passes these to the container; when running the
     # app locally they default to the same dev values.

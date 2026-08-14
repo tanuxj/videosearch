@@ -30,6 +30,9 @@ dependencies = [
     "onnx>=1.22.0",
     "onnxscript>=0.7.1",
     "imageio-ffmpeg>=0.6.0",
+    # Downloads videos from pasted URLs (YouTube, Twitch, Zoom, Vimeo, …).
+    # Pure-Python; ships its own site extractors so no CLI install is needed.
+    "yt-dlp>=2025.6.30,<2026.0.0",
 ]
 
 # torch from the CPU-only wheelhouse: the PyPI default build bundles CUDA,

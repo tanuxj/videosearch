@@ -82,6 +82,14 @@ export const UploadIcon = ({ className }: Props) => (
   </Stroke>
 )
 
+// Chain link — used for the paste-a-link import mode.
+export const LinkIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <path d="M10.5 13.5a4 4 0 005.66 0l3-3a4 4 0 00-5.66-5.66l-1.2 1.2" />
+    <path d="M13.5 10.5a4 4 0 00-5.66 0l-3 3a4 4 0 005.66 5.66l1.2-1.2" />
+  </Stroke>
+)
+
 export const DownloadIcon = ({ className }: Props) => (
   <Stroke className={className}>
     <path d="M12 4v11.5" />

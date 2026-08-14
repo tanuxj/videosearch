@@ -53,6 +53,14 @@ x-backend-env: &backend_env
   SCENE_AWARE_SAMPLING: ${SCENE_AWARE_SAMPLING:-true}
   SCENE_THRESHOLD: ${SCENE_THRESHOLD:-8.0}
   SCENE_MAX_GAP_SECONDS: ${SCENE_MAX_GAP_SECONDS:-6.0}
+  # URL import (paste-a-link): downloads pasted video links with yt-dlp
+  # before indexing. Defaults mirror config.py — never leave these empty
+  # ('' fails pydantic's parsing).
+  URL_IMPORT_ENABLED: ${URL_IMPORT_ENABLED:-true}
+  URL_IMPORT_MAX_BYTES: ${URL_IMPORT_MAX_BYTES:-10737418240}
+  URL_IMPORT_FORMAT: ${URL_IMPORT_FORMAT:-b[ext=mp4]/b}
+  URL_IMPORT_PROBE_TIMEOUT_SECONDS: ${URL_IMPORT_PROBE_TIMEOUT_SECONDS:-30}
+  URL_IMPORT_ALLOW_PRIVATE: ${URL_IMPORT_ALLOW_PRIVATE:-false}
   # Inside the compose network the DB host is the service name "db".
   POSTGRES_HOST: db
   POSTGRES_PORT: 5432
