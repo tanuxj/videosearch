@@ -272,7 +272,9 @@ export function TranscriptPanel({ video, onSeek }: Props) {
       {visible.length > 0 && open && (
         // Capped height with its own scroll: a long transcript must not push
         // the rest of the page out of reach.
-        <ol className="max-h-[22rem] divide-y divide-line overflow-y-auto">
+        // `list-none` matters: without it the browser numbers every line down
+        // the left-hand side.
+        <ol className="max-h-[22rem] list-none divide-y divide-line overflow-y-auto">
           {visible.map((segment, index) => (
             <li key={`${segment.start}-${index}`}>
               <button

@@ -6,6 +6,7 @@ import type { VideoRecord } from '../lib/store'
 import type { ReactNode } from 'react'
 import { Modal } from './Modal'
 import { ClipTrimmer, type Range } from './ClipTrimmer'
+import { LiveTranscript } from './LiveTranscript'
 import { Button } from './ui/Button'
 import {
   ArrowLeftIcon,
@@ -246,6 +247,18 @@ export function ClipLightbox({
               currentTime={currentTime}
               onSeek={seekTo}
               maxSeconds={MAX_CLIP_SECONDS}
+            />
+          )}
+
+          {/* Readable transcript, below the trimmer. The `<track>` captions on
+              the video only ever show the line being said right now and vanish
+              with it; this keeps the surrounding lines on screen and makes
+              each one seekable. */}
+          {src && (
+            <LiveTranscript
+              videoId={video?.id ?? null}
+              currentTime={currentTime}
+              onSeek={seekTo}
             />
           )}
 
