@@ -6,20 +6,32 @@ import {
   captureFrames,
   createVideoApi,
   createVideoFromUrl,
+  createVideosFromUrls,
   getVideo,
   readVideoDuration,
   saveVideo,
   streamSourceFor,
 } from '../lib/store'
-import type { VideoRecord } from '../lib/store'
+import type { UrlImportResult, VideoRecord } from '../lib/store'
 import { API_ENABLED } from '../lib/http'
 import { Modal } from './Modal'
 import { cn } from '../lib/cn'
 import { Alert, Spinner } from './AuthLayout'
 import { Button } from './ui/Button'
 import { Chip } from './ui/Data'
-import { CheckIcon, LinkIcon, PlayIcon, SearchIcon, UploadIcon } from './Icons'
+import {
+  CheckIcon,
+  FilmIcon,
+  LinkIcon,
+  PlayIcon,
+  SearchIcon,
+  UploadIcon,
+} from './Icons'
 import { compactNumber, fileSize, humanDuration } from '../lib/format'
+
+/** One row of a multi-URL import: the reserved video (or its error) plus
+ *  whether it has stopped progressing. */
+type BatchItem = UrlImportResult & { done: boolean }
 
 /**
  * Share of the bar given to the transfer, before indexing starts.
@@ -86,6 +98,11 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
   /** Which way the video enters the library: file upload or pasted link. */
   const [mode, setMode] = useState<'file' | 'url'>('file')
   const [urlInput, setUrlInput] = useState('')
+  /** Optional auto-extract prompt for URL imports: best matching scenes are
+   *  saved as clips once each video finishes indexing. */
+  const [prompt, setPrompt] = useState('')
+  /** Multi-URL import in flight — one row per resolved target URL. */
+  const [batch, setBatch] = useState<BatchItem[] | null>(null)
   /** Seconds remaining, once enough frames have landed to estimate a rate. */
   const [eta, setEta] = useState<number | null>(null)
 
@@ -113,6 +130,8 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       setError('')
       setMode('file')
       setUrlInput('')
+      setPrompt('')
+      setBatch(null)
     }, 200)
     return () => clearTimeout(timer)
   }, [open])
@@ -328,21 +347,78 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     }
   }
 
-  /** URL mode: validate the link client-side, then let the server download it. */
+  /** URL mode: validate every link client-side, then let the server import
+   *  them. One link gets the polished single-video progress card; several
+   *  get a list of per-video rows. */
   async function ingestUrl() {
     if (!user) return
-    const trimmed = urlInput.trim()
-    if (!/^https?:\/\//i.test(trimmed)) {
-      setError('Paste a full link starting with http:// or https://.')
+    const urls = urlInput
+      .split(/\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+    if (urls.length === 0) {
+      setError('Paste at least one link starting with http:// or https://.')
+      return
+    }
+    if (urls.some((line) => !/^https?:\/\//i.test(line))) {
+      setError('Every line must be a full link starting with http:// or https://.')
       return
     }
     setError('')
+    const autoPrompt = prompt.trim()
     try {
-      await ingestServer(() => createVideoFromUrl(trimmed), true)
+      if (urls.length === 1) {
+        await ingestServer(
+          () =>
+            createVideoFromUrl(urls[0]!, {
+              prompt: autoPrompt || undefined,
+              clipLimit: autoPrompt ? 3 : 0,
+            }),
+          true,
+        )
+      } else {
+        await ingestBatch(urls, autoPrompt)
+      }
     } catch (caught) {
       if (!aliveRef.current) return
       setError(caught instanceof Error ? caught.message : 'Import failed.')
     }
+  }
+
+  /** Multi-URL import: the server reserves a row per link (playlists and
+   *  channels expand into their videos), then each row is polled until it
+   *  stops progressing — indexed, failed, or skipped up front. */
+  async function ingestBatch(urls: string[], autoPrompt: string): Promise<void> {
+    const created = await createVideosFromUrls(urls, {
+      prompt: autoPrompt || undefined,
+      clipLimit: autoPrompt ? 3 : 0,
+    })
+    if (!aliveRef.current) return
+    const items = created.map((item) => ({ ...item, done: !item.video }))
+    setBatch(items)
+
+    while (aliveRef.current) {
+      const pending = items.filter((item) => item.video && !item.done)
+      if (pending.length === 0) break
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      if (!aliveRef.current) return
+      const updated = await Promise.all(
+        pending.map(async (item) => {
+          const current = (await getVideo(item.video!.id)) ?? item.video!
+          return {
+            ...item,
+            video: current,
+            done: current.status !== 'processing',
+          }
+        }),
+      )
+      for (const item of updated) {
+        const index = items.findIndex((candidate) => candidate.url === item.url)
+        if (index >= 0) items[index] = item
+      }
+      setBatch([...items])
+    }
+    setDone(true)
   }
 
   function onDrop(event: DragEvent<HTMLDivElement>) {
@@ -366,7 +442,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
           </div>
         )}
 
-        {!video ? (
+        {!video && !batch ? (
           <div className="flex flex-col gap-4">
             {API_ENABLED && (
               <div className="flex gap-1 rounded-xl border border-line bg-surface-soft p-1">
@@ -454,25 +530,39 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                 <LinkIcon />
               </span>
               <h3 className="text-[17px] font-semibold tracking-[-0.02em] text-ink">
-                Paste a video link
+                Paste video links
               </h3>
               <p className="mt-2 max-w-[48ch] text-[13.5px] leading-relaxed text-ink-dim">
-                YouTube, Twitch, Zoom, Vimeo — or any direct video file URL.
-                We’ll download it, index every frame, and make it searchable
-                like an upload.
+                YouTube, Twitch, Zoom, Vimeo, a channel or playlist — or any
+                direct video file URL. One per line; each becomes its own
+                searchable video.
               </p>
-              <input
+              <textarea
                 value={urlInput}
                 onChange={(event) => setUrlInput(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === 'Enter' && urlInput.trim()) {
+                  if (
+                    event.key === 'Enter' &&
+                    (event.metaKey || event.ctrlKey)
+                  ) {
                     event.preventDefault()
                     void ingestUrl()
                   }
                 }}
-                placeholder="https://www.youtube.com/watch?v=…"
-                aria-label="Video URL"
-                className="mt-5 w-full rounded-lg border border-line-strong bg-panel px-3.5 py-2.5 text-[14px] text-ink outline-none placeholder:text-ink-faint focus:border-brand"
+                rows={3}
+                placeholder={
+                  'https://www.youtube.com/watch?v=…\n' +
+                  'https://www.youtube.com/@ChannelName/videos'
+                }
+                aria-label="Video URLs"
+                className="mt-5 w-full resize-none rounded-lg border border-line-strong bg-panel px-3.5 py-2.5 text-left text-[14px] text-ink outline-none placeholder:text-ink-faint focus:border-brand"
+              />
+              <input
+                value={prompt}
+                onChange={(event) => setPrompt(event.target.value)}
+                placeholder="Optional: auto-save scenes that match, e.g. “a red car driving on a highway”"
+                aria-label="Auto-extract prompt"
+                className="mt-2.5 w-full rounded-lg border border-line-strong bg-panel px-3.5 py-2.5 text-[13.5px] text-ink outline-none placeholder:text-ink-faint focus:border-brand"
               />
               <Button
                 onClick={() => void ingestUrl()}
@@ -480,16 +570,81 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                 className="mt-4 [&_svg]:size-4"
               >
                 <LinkIcon />
-                Start indexing
+                Start importing
               </Button>
               <p className="mt-3 text-[12px] text-ink-faint">
-                Live streams and private recordings can’t be indexed.
+                Live streams and private recordings can’t be indexed. A channel
+                or playlist imports its latest videos.
               </p>
             </div>
           )}
           </div>
         ) : (
           <>
+            {batch ? (
+              <ul className="flex flex-col gap-2">
+                {batch.map((item) => (
+                  <li
+                    key={item.url}
+                    className="flex items-center gap-3 rounded-xl border border-line bg-surface-soft p-3"
+                  >
+                    <span className="grid size-10 shrink-0 place-items-center rounded-lg border border-line bg-surface-sunk text-brand [&_svg]:size-4">
+                      <FilmIcon />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <b
+                        className="block truncate text-[13px] font-semibold text-ink"
+                        title={item.url}
+                      >
+                        {item.video?.name ?? item.url}
+                      </b>
+                      <span className="block truncate text-[12px] text-ink-faint">
+                        {item.video
+                          ? `${fileSize(item.video.sizeBytes)}${item.video.duration > 0 ? ` · ${humanDuration(item.video.duration)}` : ''}`
+                          : item.error}
+                      </span>
+                      {item.video && item.video.status === 'processing' && (
+                        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-brand-wash">
+                          <i
+                            className={cn(
+                              'block h-full rounded-full bg-brand transition-[width] duration-300',
+                              item.video.framesTotal === 0 && 'animate-pulse',
+                            )}
+                            style={{
+                              width:
+                                item.video.framesTotal > 0
+                                  ? `${Math.min(100, (item.video.frames / item.video.framesTotal) * 100)}%`
+                                  : '30%',
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                    {item.video ? (
+                      item.video.status === 'ready' ? (
+                        <Chip tone="ok">Indexed</Chip>
+                      ) : item.video.status === 'failed' ? (
+                        <Chip
+                          tone="danger"
+                          title={item.video.error || 'Import failed on the server'}
+                        >
+                          Failed
+                        </Chip>
+                      ) : (
+                        <Chip tone="warn" pulse>
+                          {item.video.framesTotal > 0 ? 'Indexing' : 'Downloading'}
+                        </Chip>
+                      )
+                    ) : (
+                      <Chip tone="danger" title={item.error}>
+                        Skipped
+                      </Chip>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : video ? (
+              <>
             <div className="flex items-center gap-3 rounded-xl border border-line bg-surface-soft p-3">
               <span className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-lg border border-line bg-surface-sunk text-brand [&_svg]:size-5">
                 {video.poster ? (
@@ -591,17 +746,20 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                 )
               })}
             </div>
+              </>
+            ) : null}
           </>
         )}
       </div>
 
-      {video && (
+      {(video || batch) && (
         <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-soft px-5 py-3.5">
           <Button
             variant="ghost"
             disabled={!done}
             onClick={() => {
               setVideo(null)
+              setBatch(null)
               setProgress(0)
               setStage(0)
               setDone(false)
@@ -612,7 +770,14 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
           <Button
             disabled={!done}
             onClick={() => {
-              if (video) onReady?.(video)
+              if (batch) {
+                const target = batch.find(
+                  (item) => item.video?.status === 'ready',
+                )?.video
+                if (target) onReady?.(target)
+              } else if (video) {
+                onReady?.(video)
+              }
               onClose()
             }}
             className="[&_svg]:size-4"
@@ -620,7 +785,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
             {done ? (
               <>
                 <SearchIcon />
-                Search this video
+                {batch ? 'Search first result' : 'Search this video'}
               </>
             ) : (
               <>

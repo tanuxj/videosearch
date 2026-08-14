@@ -44,7 +44,8 @@ class UrlImportIn(BaseModel):
 
     Accepts YouTube/Twitch/Zoom/Vimeo links (resolved with yt-dlp) or a
     direct video file URL. Scheme and host are validated server-side (SSRF
-    guard) before anything is downloaded.
+    guard) before anything is downloaded. When `prompt` is set, the best
+    `clip_limit` matching scenes are auto-saved as clips after indexing.
     """
 
     url: str = Field(
@@ -52,6 +53,82 @@ class UrlImportIn(BaseModel):
         max_length=2048,
         examples=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
     )
+    # Optional: auto-save the scenes that match this description once the
+    # video is indexed, so the library shows highlights without a manual search.
+    prompt: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=300,
+        examples=["a red car driving on a highway"],
+    )
+    # How many top scenes to keep when `prompt` is set (0 disables auto-save).
+    clip_limit: int = Field(default=3, ge=0, le=9)
+
+
+class UrlImportBatchIn(BaseModel):
+    """Many links to download and index at once.
+
+    Each URL — or each video inside a playlist/channel link — becomes its own
+    `processing` video and is downloaded + indexed in the background. Every
+    link is validated and probed individually; failures are reported per URL
+    in the response instead of failing the whole batch. A shared `prompt`
+    auto-saves the best matching scenes on every video in the batch.
+    """
+
+    urls: list[str] = Field(
+        min_length=1,
+        max_length=100,
+        examples=[["https://www.youtube.com/watch?v=dQw4w9WgXcQ"]],
+    )
+    prompt: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=300,
+        examples=["a red car driving on a highway"],
+    )
+    clip_limit: int = Field(default=3, ge=0, le=9)
+
+
+class UrlImportItem(BaseModel):
+    """Outcome for one target URL in a batch import.
+
+    Either `video` (the reserved, now-importing row) or `error` (why that
+    link was skipped) — never both.
+    """
+
+    url: str
+    video: VideoOut | None = None
+    error: str | None = None
+
+
+class UrlImportBatchOut(BaseModel):
+    """Result of a batch import, one item per resolved target URL."""
+
+    items: list[UrlImportItem]
+    total: int = Field(description="Number of videos successfully reserved.")
+
+
+class SavedClipOut(BaseModel):
+    """A scene kept from an import — same shape a search result uses.
+
+    `frame` is the strongest matching frame's timestamp (thumbnails seek to
+    it); `score` its cosine similarity (0–1) against the prompt.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    prompt: str
+    start: float
+    end: float
+    frame: float
+    score: float
+    created_at: datetime
+
+
+class SavedClipListOut(BaseModel):
+    items: list[SavedClipOut]
+    count: int = Field(description="Number of saved clips returned.")
 
 
 class PresignUploadIn(BaseModel):

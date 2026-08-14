@@ -59,16 +59,21 @@ Settings are loaded from `.env` (see `.env.example`) via pydantic-settings in
 | `URL_IMPORT_MAX_BYTES` | `10737418240` (10 GiB)              | Cap on a URL-downloaded video |
 | `URL_IMPORT_FORMAT` | `b[ext=mp4]/b`                           | yt-dlp format preference (progressive MP4 first) |
 | `URL_IMPORT_ALLOW_PRIVATE` | `false`                         | SSRF guard — set `true` to allow private/local hosts (tests only!) |
+| `URL_IMPORT_MAX_BATCH` | `50`                                  | Most videos one batch import reserves, after playlist/channel expansion |
 
 ## URL import (paste-a-link)
 
-Users can index a video from a pasted link instead of uploading a file:
+Users can index videos from pasted links instead of uploading files:
 
 | Method | Route                   | Auth | Purpose                                        |
 | ------ | ----------------------- | ---- | ---------------------------------------------- |
 | POST   | `/api/v1/videos/from-url` | bearer | Validate the URL, reserve a `processing` video, and start the background download + index |
+| POST   | `/api/v1/videos/from-urls` | bearer | Same, for many links at once — playlists/channels expand into their videos, failures reported per URL |
+| GET    | `/api/v1/videos/{id}/clips` | bearer | List the video's auto-extracted (saved) clips |
+| DELETE | `/api/v1/videos/{id}/clips/{clip_id}` | bearer | Delete one saved clip |
 
-`POST /api/v1/videos/from-url` with `{"url": "https://…"}`:
+`POST /api/v1/videos/from-url` with `{"url": "https://…"}` (optionally
+`{"url": …, "prompt": "a red car", "clip_limit": 3}`):
 
 1. Validates the link — `http(s)` only, and the host must resolve to a
    **public** address (SSRF guard; `URL_IMPORT_ALLOW_PRIVATE=true` lifts it
@@ -80,6 +85,17 @@ Users can index a video from a pasted link instead of uploading a file:
    background (yt-dlp first, direct HTTP fallback), stores it in the same
    storage as uploads, and runs the normal indexing pipeline — so streaming,
    clip downloads and scene search all work exactly like an uploaded file.
+4. When `prompt` is set, the job runs the same CLIP search the search page
+   uses once indexing finishes and **auto-saves the best `clip_limit` scenes**
+   as clips (`GET /videos/{id}/clips`) — the library shows highlights without
+   a manual search.
+
+`POST /api/v1/videos/from-urls` with `{"urls": ["https://…", …]}` imports
+many videos at once. Playlist and channel links are expanded into their
+individual videos (capped at `URL_IMPORT_MAX_BATCH`), duplicates within the
+request are skipped, and every link is validated + probed individually — a
+bad link reports its own error instead of failing the batch. A shared
+`prompt` auto-saves matching clips on every imported video.
 
 Caveats: downloading YouTube videos can violate their ToS and some videos
 are throttled/geo-blocked; Zoom recordings usually require login; live
