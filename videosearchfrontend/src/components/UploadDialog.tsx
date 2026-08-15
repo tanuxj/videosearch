@@ -12,7 +12,8 @@ import {
   saveVideo,
   streamSourceFor,
 } from '../lib/store'
-import type { UrlImportResult, VideoRecord } from '../lib/store'
+import type { VideoRecord } from '../lib/store'
+import { addVideosToCollection, createCollection, useCollections } from '../lib/collections'
 import { API_ENABLED } from '../lib/http'
 import { Modal } from './Modal'
 import { cn } from '../lib/cn'
@@ -22,6 +23,7 @@ import { Chip } from './ui/Data'
 import {
   CheckIcon,
   FilmIcon,
+  LayersIcon,
   LinkIcon,
   PlayIcon,
   SearchIcon,
@@ -29,9 +31,31 @@ import {
 } from './Icons'
 import { compactNumber, fileSize, humanDuration } from '../lib/format'
 
-/** One row of a multi-URL import: the reserved video (or its error) plus
- *  whether it has stopped progressing. */
-type BatchItem = UrlImportResult & { done: boolean }
+/**
+ * One row of a bulk import — a pasted link or a picked file.
+ *
+ * Both sources converge on this shape so the progress list below renders them
+ * identically: `label` is what to show until the server names the video,
+ * `transfer` drives the bar during the upload (files only — a URL import has
+ * no client-side bytes to count), and `done` means the row has stopped moving,
+ * whether it landed indexed, failed, or was skipped up front.
+ */
+type BatchItem = {
+  /** Stable react key: the URL, or `name:index` for a file. */
+  key: string
+  label: string
+  video?: VideoRecord
+  error?: string
+  /** 0–1 upload progress, before a video row exists to poll. */
+  transfer?: number
+  done: boolean
+}
+
+/** How many files upload at once. More saturates the uplink and the API. */
+const UPLOAD_CONCURRENCY = 3
+
+/** Sentinel `<select>` value that reveals the "new collection" name field. */
+const NEW_COLLECTION = '__new__'
 
 /**
  * Share of the bar given to the transfer, before indexing starts.
@@ -130,7 +154,9 @@ type Props = {
 export function UploadDialog({ open, onClose, onReady }: Props) {
   const { user } = useAuth()
   const inputRef = useRef<HTMLInputElement>(null)
+  const folderRef = useRef<HTMLInputElement>(null)
   const aliveRef = useRef(true)
+  const { collections, refresh: refreshCollections } = useCollections()
 
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
@@ -146,8 +172,17 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
   /** Optional auto-extract prompt for URL imports: best matching scenes are
    *  saved as clips once each video finishes indexing. */
   const [prompt, setPrompt] = useState('')
-  /** Multi-URL import in flight — one row per resolved target URL. */
+  /** Bulk import in flight — one row per file or resolved target URL. */
   const [batch, setBatch] = useState<BatchItem[] | null>(null)
+  /**
+   * Collection everything in this dialog is filed into.
+   *
+   * '' is "don't file it anywhere" and NEW_COLLECTION opens the name field —
+   * filing at upload time is the only moment the user has the whole batch in
+   * mind, so it's much cheaper than tagging forty videos afterwards.
+   */
+  const [collectionId, setCollectionId] = useState('')
+  const [newCollection, setNewCollection] = useState('')
   /** Seconds remaining, once enough frames have landed to estimate a rate. */
   const [eta, setEta] = useState<number | null>(null)
 
@@ -178,6 +213,8 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       setUrlInput('')
       setPrompt('')
       setBatch(null)
+      setCollectionId('')
+      setNewCollection('')
     }, 200)
     return () => clearTimeout(timer)
   }, [open])
@@ -195,6 +232,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
   async function ingestServer(
     create: (onProgress: (loaded: number, total: number) => void) => Promise<VideoRecord>,
     isUrl: boolean,
+    collection?: string,
   ): Promise<void> {
     if (!user) return
     setStage(0)
@@ -210,6 +248,11 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     })
     if (!aliveRef.current) return
     setVideo(record) // server owns the record — nothing to persist locally
+    if (collection) {
+      // Best effort: the video is uploaded either way, and a filing failure
+      // must not read as a failed import.
+      await addVideosToCollection(collection, [record.id]).catch(() => {})
+    }
     if (!isUrl) {
       setStage(1)
       setProgress(UPLOAD_SHARE)
@@ -326,6 +369,8 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       status: 'processing',
       // Demo mode has no server, so there is no transcription to wait for.
       transcriptStatus: 'skipped',
+      // Collections are server-only; demo mode files nothing.
+      collectionIds: [],
       createdAt: new Date().toISOString(),
     }
 
@@ -370,25 +415,218 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     setDone(true)
   }
 
-  async function ingest(file: File) {
-    if (!user) return
-    setError('')
-
+  /** Why this file can't be indexed, or null when it's fine. */
+  function rejectReason(file: File): string | null {
+    // A folder pick yields every file in the tree, so this is the filter that
+    // keeps the README and the cover art out of the queue — hence skipping
+    // silently rather than erroring the whole batch.
     if (!file.type.startsWith('video/')) {
-      setError('That file isn’t a video. Try an MP4, MOV or WebM.')
-      return
+      return 'Not a video file'
     }
     if (file.size > MAX_BYTES) {
-      setError(`Files are capped at ${fileSize(MAX_BYTES)} for now.`)
+      return `Larger than the ${fileSize(MAX_BYTES)} limit`
+    }
+    return null
+  }
+
+  /**
+   * Resolve the collection picker to an id, creating the collection first when
+   * the user typed a new name.
+   *
+   * Typing the name of a collection that already exists reuses it rather than
+   * failing on the server's uniqueness check — from the user's side "put these
+   * in Lectures" means the same thing whether or not Lectures exists yet.
+   */
+  async function ensureCollection(): Promise<string | undefined> {
+    if (!API_ENABLED) return undefined
+    if (collectionId !== NEW_COLLECTION) return collectionId || undefined
+    const name = newCollection.trim()
+    if (!name) return undefined
+    const existing = collections.find(
+      (item) => item.name.toLowerCase() === name.toLowerCase(),
+    )
+    if (existing) return existing.id
+    const created = await createCollection(name)
+    return created.id
+  }
+
+  /**
+   * Poll every row holding a video until it stops progressing.
+   *
+   * `moreComing` keeps the loop alive while uploads are still in flight —
+   * without it a file batch would exit on the first tick, before the first
+   * upload had produced a video row to poll.
+   */
+  async function pollBatch(items: BatchItem[], moreComing: () => boolean): Promise<void> {
+    while (aliveRef.current) {
+      const pending = items.filter((item) => item.video && !item.done)
+      if (pending.length === 0 && !moreComing()) break
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      if (!aliveRef.current) return
+      const updated = await Promise.all(
+        pending.map(async (item) => {
+          const current = (await getVideo(item.video!.id)) ?? item.video!
+          return { ...item, video: current, done: current.status !== 'processing' }
+        }),
+      )
+      for (const item of updated) {
+        const index = items.findIndex((candidate) => candidate.key === item.key)
+        if (index >= 0) items[index] = item
+      }
+      setBatch([...items])
+    }
+  }
+
+  /**
+   * Upload many files at once, `UPLOAD_CONCURRENCY` at a time.
+   *
+   * Each file is independent: one rejected type or failed transfer marks its
+   * own row and the rest carry on. Uploading and indexing overlap — a file that
+   * finished transferring is already being polled while later files are still
+   * going up.
+   */
+  async function ingestFiles(files: File[]): Promise<void> {
+    if (!user) return
+
+    let targetCollection: string | undefined
+    try {
+      targetCollection = await ensureCollection()
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Could not create that collection.',
+      )
+      return
+    }
+
+    const items: BatchItem[] = files.map((file, index) => {
+      const reason = rejectReason(file)
+      return {
+        key: `${file.name}:${index}`,
+        label: file.name,
+        ...(reason ? { error: reason } : { transfer: 0 }),
+        done: reason !== null,
+      }
+    })
+    setBatch(items)
+
+    const update = (index: number, patch: Partial<BatchItem>) => {
+      items[index] = { ...items[index]!, ...patch }
+      setBatch([...items])
+    }
+
+    const queue = files
+      .map((file, index) => ({ file, index }))
+      .filter(({ index }) => !items[index]!.done)
+    let cursor = 0
+    let remaining = queue.length
+
+    async function worker(): Promise<void> {
+      while (aliveRef.current) {
+        const next = queue[cursor++]
+        if (!next) return
+        const { file, index } = next
+        try {
+          const record = await createVideoApi(file, (loaded, total) => {
+            if (!aliveRef.current) return
+            update(index, { transfer: total > 0 ? loaded / total : 1 })
+          })
+          update(index, { video: record, transfer: 1 })
+          if (targetCollection) {
+            // Best effort: a video that uploaded fine must not be reported as
+            // failed just because filing it away didn't stick.
+            await addVideosToCollection(targetCollection, [record.id]).catch(() => {})
+          }
+        } catch (caught) {
+          update(index, {
+            error: caught instanceof Error ? caught.message : 'Upload failed.',
+            done: true,
+          })
+        } finally {
+          remaining -= 1
+        }
+      }
+    }
+
+    await Promise.all([
+      Promise.all(
+        Array.from({ length: Math.min(UPLOAD_CONCURRENCY, queue.length) }, worker),
+      ),
+      pollBatch(items, () => remaining > 0),
+    ])
+    if (!aliveRef.current) return
+    setDone(true)
+    refreshCollections()
+  }
+
+  /**
+   * Entry point for picked or dropped files.
+   *
+   * One file keeps the detailed single-video card (stages, ETA, poster); more
+   * than one switches to the per-row batch list, which is the same list a
+   * multi-link URL import uses.
+   */
+  async function ingest(files: File[]) {
+    if (!user || files.length === 0) return
+    setError('')
+    setNote('')
+
+    if (!API_ENABLED) {
+      // Demo mode has no server to parallelise against — walk them in turn so
+      // nothing is silently dropped from a multi-file pick.
+      try {
+        for (const file of files) {
+          if (!aliveRef.current) return
+          if (rejectReason(file)) continue
+          await ingestDemo(file)
+        }
+      } catch (caught) {
+        if (!aliveRef.current) return
+        setError(caught instanceof Error ? caught.message : 'Upload failed.')
+      }
+      return
+    }
+
+    if (files.length > 1) {
+      const skipped = files.filter((file) => rejectReason(file)).length
+      if (skipped > 0) {
+        setNote(
+          `${skipped} of ${files.length} files aren’t indexable videos — they’re listed below as skipped.`,
+        )
+      }
+      try {
+        await ingestFiles(files)
+      } catch (caught) {
+        if (!aliveRef.current) return
+        setError(caught instanceof Error ? caught.message : 'Upload failed.')
+      }
+      return
+    }
+
+    const file = files[0]!
+    const reason = rejectReason(file)
+    if (reason) {
+      setError(
+        reason === 'Not a video file'
+          ? 'That file isn’t a video. Try an MP4, MOV or WebM.'
+          : `Files are capped at ${fileSize(MAX_BYTES)} for now.`,
+      )
       return
     }
 
     try {
-      if (API_ENABLED) {
-        await ingestServer((onProgress) => createVideoApi(file, onProgress), false)
-      } else {
-        await ingestDemo(file)
+      let collection: string | undefined
+      try {
+        collection = await ensureCollection()
+      } catch (caught) {
+        setError(
+          caught instanceof Error ? caught.message : 'Could not create that collection.',
+        )
+        return
       }
+      await ingestServer((onProgress) => createVideoApi(file, onProgress), false, collection)
+      refreshCollections()
     } catch (caught) {
       if (!aliveRef.current) return
       setError(caught instanceof Error ? caught.message : 'Upload failed.')
@@ -419,6 +657,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     )
     const autoPrompt = prompt.trim()
     try {
+      const collection = await ensureCollection()
       if (https.length === 1) {
         await ingestServer(
           () =>
@@ -427,10 +666,12 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
               clipLimit: autoPrompt ? 3 : 0,
             }),
           true,
+          collection,
         )
       } else {
-        await ingestBatch(https, autoPrompt)
+        await ingestBatch(https, autoPrompt, collection)
       }
+      refreshCollections()
     } catch (caught) {
       if (!aliveRef.current) return
       setError(caught instanceof Error ? caught.message : 'Import failed.')
@@ -440,44 +681,41 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
   /** Multi-URL import: the server reserves a row per link (playlists and
    *  channels expand into their videos), then each row is polled until it
    *  stops progressing — indexed, failed, or skipped up front. */
-  async function ingestBatch(urls: string[], autoPrompt: string): Promise<void> {
+  async function ingestBatch(
+    urls: string[],
+    autoPrompt: string,
+    collection?: string,
+  ): Promise<void> {
     const created = await createVideosFromUrls(urls, {
       prompt: autoPrompt || undefined,
       clipLimit: autoPrompt ? 3 : 0,
     })
     if (!aliveRef.current) return
-    const items = created.map((item) => ({ ...item, done: !item.video }))
+    const items: BatchItem[] = created.map((item) => ({
+      key: item.url,
+      label: item.url,
+      ...(item.video ? { video: item.video } : {}),
+      ...(item.error ? { error: item.error } : {}),
+      done: !item.video,
+    }))
     setBatch(items)
 
-    while (aliveRef.current) {
-      const pending = items.filter((item) => item.video && !item.done)
-      if (pending.length === 0) break
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-      if (!aliveRef.current) return
-      const updated = await Promise.all(
-        pending.map(async (item) => {
-          const current = (await getVideo(item.video!.id)) ?? item.video!
-          return {
-            ...item,
-            video: current,
-            done: current.status !== 'processing',
-          }
-        }),
-      )
-      for (const item of updated) {
-        const index = items.findIndex((candidate) => candidate.url === item.url)
-        if (index >= 0) items[index] = item
-      }
-      setBatch([...items])
+    if (collection) {
+      const ids = items.flatMap((item) => (item.video ? [item.video.id] : []))
+      await addVideosToCollection(collection, ids).catch(() => {})
     }
+
+    // Every row already has its video (or its error) — nothing more is coming.
+    await pollBatch(items, () => false)
+    if (!aliveRef.current) return
     setDone(true)
   }
 
   function onDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
     setDragging(false)
-    const file = event.dataTransfer.files?.[0]
-    if (file) void ingest(file)
+    const files = Array.from(event.dataTransfer.files ?? [])
+    if (files.length > 0) void ingest(files)
   }
 
   return (
@@ -555,30 +793,61 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
               <UploadIcon />
             </span>
             <h3 className="text-[17px] font-semibold tracking-[-0.02em] text-ink">
-              Drop your video here
+              Drop your videos here
             </h3>
             <p className="mt-2 max-w-[42ch] text-[13.5px] leading-relaxed text-ink-dim">
-              Indexing starts the moment the file lands — a ten-minute clip
-              takes about a minute.
+              Drop as many as you like — {UPLOAD_CONCURRENCY} upload at a time
+              and each starts indexing the moment it lands.
             </p>
-            <Button
-              onClick={() => inputRef.current?.click()}
-              className="mt-5 [&_svg]:size-4"
-            >
-              <UploadIcon />
-              Choose a file
-            </Button>
+            <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+              <Button
+                onClick={() => inputRef.current?.click()}
+                className="[&_svg]:size-4"
+              >
+                <UploadIcon />
+                Choose files
+              </Button>
+              {API_ENABLED && (
+                <Button
+                  variant="secondary"
+                  onClick={() => folderRef.current?.click()}
+                  className="[&_svg]:size-4"
+                >
+                  <LayersIcon />
+                  Choose a folder
+                </Button>
+              )}
+            </div>
             <p className="mt-3.5 text-[12px] text-ink-faint">
-              MP4, MOV, WebM or MKV · up to {fileSize(MAX_BYTES)}
+              MP4, MOV, WebM or MKV · up to {fileSize(MAX_BYTES)} each
+              {API_ENABLED && ' · non-video files in a folder are skipped'}
             </p>
             <input
               ref={inputRef}
               type="file"
               accept="video/*"
+              multiple
               className="sr-only"
               onChange={(event) => {
-                const file = event.target.files?.[0]
-                if (file) void ingest(file)
+                const files = Array.from(event.target.files ?? [])
+                if (files.length > 0) void ingest(files)
+                event.target.value = ''
+              }}
+            />
+            {/* `webkitdirectory` is non-standard but supported everywhere that
+                matters; it hands back every file in the tree, which is why
+                `rejectReason` filters rather than erroring. */}
+            <input
+              ref={folderRef}
+              type="file"
+              // @ts-expect-error - webkitdirectory isn't in React's HTML types
+              webkitdirectory=""
+              directory=""
+              multiple
+              className="sr-only"
+              onChange={(event) => {
+                const files = Array.from(event.target.files ?? [])
+                if (files.length > 0) void ingest(files)
                 event.target.value = ''
               }}
             />
@@ -638,6 +907,45 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
               </p>
             </div>
           )}
+
+          {/* Filing happens here because this is the one moment the user has
+              the whole batch in mind — tagging forty videos afterwards is a
+              chore nobody does. */}
+          {API_ENABLED && (
+            <div className="flex flex-col gap-2 rounded-xl border border-line bg-surface-soft p-3.5">
+              <label
+                htmlFor="upload-collection"
+                className="text-[12.5px] font-medium text-ink-dim"
+              >
+                Add to collection{' '}
+                <span className="font-normal text-ink-faint">(optional)</span>
+              </label>
+              <select
+                id="upload-collection"
+                value={collectionId}
+                onChange={(event) => setCollectionId(event.target.value)}
+                className="w-full rounded-lg border border-line-strong bg-panel px-3 py-2 text-[13.5px] text-ink outline-none focus:border-brand"
+              >
+                <option value="">Don’t file it anywhere</option>
+                {collections.map((collection) => (
+                  <option key={collection.id} value={collection.id}>
+                    {collection.name} ({collection.videoCount})
+                  </option>
+                ))}
+                <option value={NEW_COLLECTION}>+ New collection…</option>
+              </select>
+              {collectionId === NEW_COLLECTION && (
+                <input
+                  value={newCollection}
+                  onChange={(event) => setNewCollection(event.target.value)}
+                  placeholder="Collection name, e.g. “Lectures”"
+                  aria-label="New collection name"
+                  autoFocus
+                  className="w-full rounded-lg border border-line-strong bg-panel px-3 py-2 text-[13.5px] text-ink outline-none placeholder:text-ink-faint focus:border-brand"
+                />
+              )}
+            </div>
+          )}
           </div>
         ) : (
           <>
@@ -645,7 +953,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
               <ul className="flex flex-col gap-2">
                 {batch.map((item) => (
                   <li
-                    key={item.url}
+                    key={item.key}
                     className="flex items-center gap-3 rounded-xl border border-line bg-surface-soft p-3"
                   >
                     <span className="grid size-10 shrink-0 place-items-center rounded-lg border border-line bg-surface-sunk text-brand [&_svg]:size-4">
@@ -654,15 +962,25 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                     <div className="min-w-0 flex-1">
                       <b
                         className="block truncate text-[13px] font-semibold text-ink"
-                        title={item.url}
+                        title={item.label}
                       >
-                        {item.video?.name ?? item.url}
+                        {item.video?.name ?? item.label}
                       </b>
                       <span className="block truncate text-[12px] text-ink-faint">
                         {item.video
                           ? `${fileSize(item.video.sizeBytes)}${item.video.duration > 0 ? ` · ${humanDuration(item.video.duration)}` : ''}`
                           : item.error}
                       </span>
+                      {/* Two bars, one track: bytes while the file is going up,
+                          then frames once the server has a row to report. */}
+                      {!item.video && item.transfer !== undefined && !item.done && (
+                        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-brand-wash">
+                          <i
+                            className="block h-full rounded-full bg-brand transition-[width] duration-300"
+                            style={{ width: `${Math.round(item.transfer * 100)}%` }}
+                          />
+                        </div>
+                      )}
                       {item.video && item.video.status === 'processing' && (
                         <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-brand-wash">
                           <i
@@ -695,9 +1013,13 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                           {item.video.framesTotal > 0 ? 'Indexing' : 'Downloading'}
                         </Chip>
                       )
-                    ) : (
+                    ) : item.done ? (
                       <Chip tone="danger" title={item.error}>
                         Skipped
+                      </Chip>
+                    ) : (
+                      <Chip tone="warn" pulse>
+                        {item.transfer ? `${Math.round(item.transfer * 100)}%` : 'Queued'}
                       </Chip>
                     )}
                   </li>

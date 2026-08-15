@@ -32,6 +32,7 @@ from starlette.background import BackgroundTask
 
 from app.auth.deps import CurrentUser, DbSession
 from app.auth.schemas import MessageResponse
+from app.collections import service as collections_service
 from app.core.config import get_settings
 from app.videos import clips, pipeline, saved_clips, transcribe, url_import
 from app.videos import service as videos_service
@@ -674,10 +675,29 @@ async def complete_multipart_video(
     "",
     response_model=VideoListOut,
     summary="List my videos",
-    description="Videos owned by the signed-in user, newest first.",
+    description=(
+        "Videos owned by the signed-in user, newest first. Pass `collection_id` "
+        "to show only the videos filed in one collection. Each item carries the "
+        "ids of every collection it belongs to."
+    ),
 )
-async def list_videos(user: CurrentUser, db: DbSession) -> VideoListOut:
-    items = await videos_service.list_videos(db, user.id)
+async def list_videos(
+    user: CurrentUser,
+    db: DbSession,
+    collection_id: Annotated[
+        uuid.UUID | None,
+        Query(description="Only videos filed in this collection."),
+    ] = None,
+) -> VideoListOut:
+    videos = await videos_service.list_videos(db, user.id, collection_id=collection_id)
+    # One query for the whole page rather than one per card.
+    memberships = await collections_service.collection_ids_for(db, [video.id for video in videos])
+    items = [
+        VideoOut.model_validate(video).model_copy(
+            update={"collection_ids": memberships.get(video.id, [])}
+        )
+        for video in videos
+    ]
     return VideoListOut(items=items, count=len(items))
 
 

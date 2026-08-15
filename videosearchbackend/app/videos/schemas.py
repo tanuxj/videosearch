@@ -25,6 +25,10 @@ class VideoOut(BaseModel):
     transcript_status: str
     # Detected spoken language (ISO-639-1 where recognised), once known.
     language: str | None = None
+    # Collections this video is filed in. Populated by the list endpoint from
+    # one batched query; empty on the single-video routes, which don't pay for
+    # the extra lookup.
+    collection_ids: list[uuid.UUID] = []
     created_at: datetime
     updated_at: datetime
 

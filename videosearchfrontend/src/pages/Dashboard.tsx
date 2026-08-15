@@ -2,10 +2,12 @@ import { useState } from 'react'
 import { useNavigate } from '../lib/router'
 import { useAuth } from '../lib/auth'
 import { removeVideo, sourceFor, useVideos } from '../lib/store'
+import { useCollections } from '../lib/collections'
 import { API_ENABLED } from '../lib/http'
 import { AppShell } from '../components/Shell'
 import { UploadDialog } from '../components/UploadDialog'
 import { SavedClips } from '../components/SavedClips'
+import { CollectionBar, CollectionMenu } from '../components/Collections'
 import { Button } from '../components/ui/Button'
 import {
   Chip,
@@ -34,12 +36,29 @@ export default function Dashboard() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const videos = useVideos(user?.id)
+  const { collections } = useCollections()
   const [uploadOpen, setUploadOpen] = useState(false)
+  /** Collection currently filtering the grid; null is "all videos". */
+  const [activeCollection, setActiveCollection] = useState<string | null>(null)
 
+  // Filtered here rather than through the API's `collection_id` param: the
+  // library is already loaded and carries its membership, so switching
+  // collections is instant instead of a round trip. The server-side filter is
+  // still there for libraries too large to hold client-side.
+  const shown =
+    activeCollection === null
+      ? videos
+      : videos.filter((video) => video.collectionIds.includes(activeCollection))
+
+  // Stats describe the whole library, not the current filter — they are the
+  // workspace summary at the top of the page, not a readout of the grid.
   const totalFrames = videos.reduce((sum, video) => sum + video.frames, 0)
   const totalSeconds = videos.reduce((sum, video) => sum + video.duration, 0)
   const totalBytes = videos.reduce((sum, video) => sum + video.sizeBytes, 0)
   const ready = videos.filter((video) => video.status === 'ready').length
+
+  const activeName =
+    collections.find((item) => item.id === activeCollection)?.name ?? null
 
   const firstName = user?.name.split(' ')[0] ?? 'there'
 
@@ -99,7 +118,11 @@ export default function Dashboard() {
         
         <Panel
             title="Your videos"
-            subtitle="Pick one to search, or add something new."
+            subtitle={
+              activeName
+                ? `Showing the “${activeName}” collection.`
+                : 'Pick one to search, or add something new.'
+            }
             actions={
               <Button
                 variant="secondary"
@@ -108,28 +131,50 @@ export default function Dashboard() {
                 className="[&_svg]:size-4"
               >
                 <UploadIcon />
-                Add video
+                Add videos
               </Button>
             }
           >
+            {API_ENABLED && videos.length > 0 && (
+              <div className="border-b border-line px-4 py-3 sm:px-5">
+                <CollectionBar
+                  collections={collections}
+                  activeId={activeCollection}
+                  onSelect={setActiveCollection}
+                  totalCount={videos.length}
+                />
+              </div>
+            )}
+
             {videos.length === 0 ? (
               <EmptyState
                 icon={<UploadIcon />}
                 title="No videos yet"
-                body="Add your first video and we’ll index every frame so you can search it by description."
+                body="Add your first videos and we’ll index every frame so you can search them by description."
                 action={
                   <Button
                     onClick={() => setUploadOpen(true)}
                     className="[&_svg]:size-4"
                   >
                     <UploadIcon />
-                    Add a video
+                    Add videos
+                  </Button>
+                }
+              />
+            ) : shown.length === 0 ? (
+              <EmptyState
+                icon={<LayersIcon />}
+                title="Nothing filed here yet"
+                body={`No videos are in “${activeName ?? ''}”. Use the File button on any video to add it, or pick a collection when you upload.`}
+                action={
+                  <Button variant="secondary" onClick={() => setActiveCollection(null)}>
+                    Show all videos
                   </Button>
                 }
               />
             ) : (
               <ul className="divide-y divide-[var(--border)]">
-                {videos.map((video) => (
+                {shown.map((video) => (
                   <li
                     key={video.id}
                     className="transition-colors hover:bg-surface-soft"
@@ -179,6 +224,10 @@ export default function Dashboard() {
                         <Chip title="The file handle was lost when the tab reloaded — re-attach it on the search page to play clips back.">
                           Playback offline
                         </Chip>
+                      )}
+
+                      {API_ENABLED && (
+                        <CollectionMenu video={video} collections={collections} />
                       )}
 
                       <Button

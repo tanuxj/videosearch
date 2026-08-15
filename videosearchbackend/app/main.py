@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import __version__
 from app.api.routes import health, search
 from app.auth.routes import router as auth_router
+from app.collections.routes import router as collections_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db import session as db_session
@@ -82,6 +83,7 @@ app.add_middleware(
 app.include_router(health.router, prefix=settings.api_v1_prefix, tags=["health"])
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
 app.include_router(videos_router, prefix=settings.api_v1_prefix)
+app.include_router(collections_router, prefix=settings.api_v1_prefix)
 app.include_router(clip_search_router, prefix=settings.api_v1_prefix)
 app.include_router(history_router, prefix=settings.api_v1_prefix)
 app.include_router(search.router, prefix=settings.api_v1_prefix, tags=["search"])

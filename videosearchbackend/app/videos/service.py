@@ -13,6 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.collections.models import CollectionVideo
 from app.core.config import get_settings
 from app.videos.models import TranscriptSegment, Video
 from app.videos.storage import storage
@@ -274,10 +275,24 @@ async def complete_pending_video(
     return video
 
 
-async def list_videos(db: AsyncSession, owner_id: uuid.UUID) -> list[Video]:
-    result = await db.execute(
-        select(Video).where(Video.owner_id == owner_id).order_by(Video.created_at.desc())
-    )
+async def list_videos(
+    db: AsyncSession,
+    owner_id: uuid.UUID,
+    *,
+    collection_id: uuid.UUID | None = None,
+) -> list[Video]:
+    """The user's videos, newest first, optionally narrowed to one collection.
+
+    An unknown or someone else's `collection_id` yields an empty list rather
+    than an error: the join finds no membership rows, and the `owner_id` filter
+    means a leaked id can never widen the result past the caller's own library.
+    """
+    query = select(Video).where(Video.owner_id == owner_id)
+    if collection_id is not None:
+        query = query.join(CollectionVideo, CollectionVideo.video_id == Video.id).where(
+            CollectionVideo.collection_id == collection_id
+        )
+    result = await db.execute(query.order_by(Video.created_at.desc()))
     return list(result.scalars())
 
 

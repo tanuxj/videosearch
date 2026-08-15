@@ -64,6 +64,13 @@ export type VideoRecord = {
   transcriptStatus: TranscriptStatus
   /** Detected spoken language (ISO-639-1 where known) — the track's srclang. */
   language?: string
+  /**
+   * Ids of the collections this video is filed in — many-to-many, so a video
+   * can appear under several. Only the list endpoint populates it; the
+   * single-video route doesn't pay for the extra lookup, so treat an empty
+   * array on a polled record as "unknown", not "filed nowhere".
+   */
+  collectionIds: string[]
   createdAt: string
   /** Small JPEG data URL captured from the first seconds of the video. */
   poster?: string
@@ -83,6 +90,7 @@ type ApiVideo = {
   frames_indexed: number
   transcript_status?: TranscriptStatus
   language?: string | null
+  collection_ids?: string[]
   created_at: string
 }
 
@@ -141,6 +149,7 @@ function toRecord(video: ApiVideo): VideoRecord {
     // coming" rather than leaving the UI polling forever.
     transcriptStatus: video.transcript_status ?? 'skipped',
     language: video.language ?? undefined,
+    collectionIds: video.collection_ids ?? [],
     createdAt: video.created_at,
     error: video.error ?? undefined,
   }
@@ -159,6 +168,16 @@ async function listApi(): Promise<VideoRecord[]> {
 export async function listVideos(userId: string): Promise<VideoRecord[]> {
   if (API_ENABLED) return listApi()
   return listLocal(userId)
+}
+
+/**
+ * Ask every `useVideos` mount to re-list.
+ *
+ * For changes that live on the video rows but are made elsewhere — filing a
+ * video into a collection, say — where the store itself never sees the write.
+ */
+export function refreshVideos(): void {
+  emit()
 }
 
 /** Read a single video (used to poll indexing progress after an upload). */
