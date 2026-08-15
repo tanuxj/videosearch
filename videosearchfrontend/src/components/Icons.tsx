@@ -242,3 +242,76 @@ export const TagIcon = ({ className }: Props) => (
     <circle cx="8" cy="8" r="1.4" />
   </Stroke>
 )
+
+/* ── Recording ──────────────────────────────────────────── */
+
+// Record glyph for the sidebar tab: a ring around a filled dot, drawn at
+// stroke weight like every other nav icon.
+export const RecordIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <circle cx="12" cy="12" r="7.5" />
+    <circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" />
+  </Stroke>
+)
+
+// Monitor with a small recording dot on its upper-right corner — the CTA for
+// screen capture, and the selected state of the "Screen" mode card.
+export const MonitorIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <rect x="3" y="4.5" width="18" height="12.5" rx="2.5" />
+    <path d="M9.5 20.5h5" />
+    <path d="M12 17v3.5" />
+    <circle cx="17.8" cy="7.2" r="1.5" fill="currentColor" stroke="none" />
+  </Stroke>
+)
+
+export const MicIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5.5 11.5a6.5 6.5 0 0013 0" />
+    <path d="M12 18v3" />
+  </Stroke>
+)
+
+// Camera body with the lens hood triangle on top-right.
+export const CameraIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <path d="M4 8.5A2 2 0 016 6.5h8a2 2 0 012 2v7a2 2 0 01-2 2H6a2 2 0 01-2-2v-7z" />
+    <path d="M16 10.5l4-2.5v8l-4-2.5" />
+  </Stroke>
+)
+
+// Same body crossed out — the "No camera" placeholder in the setup modal.
+export const CameraOffIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <path d="M4 8.5A2 2 0 016 6.5h8a2 2 0 012 2v7a2 2 0 01-2 2H6a2 2 0 01-2-2v-7z" />
+    <path d="M16 10.5l4-2.5v8l-4-2.5" />
+    <path d="M3.5 3.5l17 17" />
+  </Stroke>
+)
+
+// Audio waveform bars — the "Audio only" mode card.
+export const WaveIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <path d="M4 10.5v3" />
+    <path d="M8 8v8" />
+    <path d="M12 5.5v13" />
+    <path d="M16 8.5v7" />
+    <path d="M20 11v2" />
+  </Stroke>
+)
+
+export const GlobeIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <circle cx="12" cy="12" r="8" />
+    <path d="M4 12h16" />
+    <path d="M12 4c2.5 2.3 3.8 5 3.8 8s-1.3 5.7-3.8 8c-2.5-2.3-3.8-5-3.8-8s1.3-5.7 3.8-8z" />
+  </Stroke>
+)
+
+// Solid square — stop recording.
+export const StopIcon = ({ className }: Props) => (
+  <Solid className={className}>
+    <rect x="6.5" y="6.5" width="11" height="11" rx="2.2" />
+  </Solid>
+)

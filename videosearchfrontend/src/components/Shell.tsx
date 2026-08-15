@@ -6,6 +6,7 @@ import { ButtonLink } from './ui/Button'
 import {
   GridIcon,
   HistoryIcon,
+  RecordIcon,
   SearchIcon,
   SignOutIcon,
   UploadIcon,
@@ -118,6 +119,7 @@ export function MarketingShell({ children }: { children: ReactNode }) {
 const NAV_MAIN = [
   { to: '/search', label: 'Search', icon: SearchIcon },
   { to: '/history', label: 'History', icon: HistoryIcon },
+  { to: '/record', label: 'Record', icon: RecordIcon },
   { to: '/dashboard', label: 'Library', icon: GridIcon },
 ]
 

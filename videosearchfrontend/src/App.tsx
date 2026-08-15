@@ -10,8 +10,9 @@ import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
 import History from './pages/History'
 import Search from './pages/Search'
+import Record from './pages/Record'
 
-const PROTECTED = new Set(['/dashboard', '/upload', '/search', '/history'])
+const PROTECTED = new Set(['/dashboard', '/upload', '/search', '/history', '/record'])
 const AUTH_ONLY = new Set(['/login', '/signup'])
 
 function NotFound() {
@@ -70,6 +71,8 @@ function Routes() {
       return <Search />
     case '/history':
       return <History />
+    case '/record':
+      return <Record />
     case '/upload':
       return null // redirected above
     default:
