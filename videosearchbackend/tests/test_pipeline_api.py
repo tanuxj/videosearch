@@ -10,6 +10,7 @@ vector keyed on its dominant colour, so search results are fully predictable.
 """
 
 import io
+import subprocess
 import uuid
 
 import cv2
@@ -21,6 +22,7 @@ from sqlalchemy import text
 from app.core.config import get_settings
 from app.db.session import engine
 from app.videos import embedder, pipeline, query_expand
+from app.videos.clips import ffmpeg_binary
 from tests.conftest import needs_db
 
 pytestmark = needs_db
@@ -41,6 +43,33 @@ def clip_bytes(tmp_path_factory: pytest.TempPathFactory) -> bytes:
         frame = np.full((64, 64, 3), color, dtype=np.uint8)
         writer.write(frame)
     writer.release()
+    return path.read_bytes()
+
+
+@pytest.fixture(scope="module")
+def audio_only_bytes(tmp_path_factory: pytest.TempPathFactory) -> bytes:
+    """A 3-second audio-only webm — a mic-only recording, no video track."""
+    path = tmp_path_factory.mktemp("audio") / "voice.webm"
+    subprocess.run(
+        [
+            ffmpeg_binary(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=3",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
     return path.read_bytes()
 
 
@@ -141,6 +170,66 @@ def test_index_is_idempotent(client: TestClient, fake_embedder: None, clip_bytes
     body = client.get(f"/api/v1/videos/{video_id}", headers=headers).json()
     assert body["status"] == "ready"
     assert body["frames_indexed"] == 3
+
+
+def test_audio_only_upload_is_ready_without_frames(
+    client: TestClient, audio_only_bytes: bytes
+) -> None:
+    """An audio-only recording has nothing to frame-index: it lands ready, not failed.
+
+    This is the path a mic-only recording from the Record tab takes: OpenCV
+    can't open the file, and the pipeline must recognise that as "nothing to
+    index" instead of a failure — the video is ready with zero frames (its
+    transcript still comes from the audio).
+    """
+    headers = _signup(client)
+    files = {"file": ("voice.webm", io.BytesIO(audio_only_bytes), "audio/webm")}
+    response = client.post("/api/v1/videos", headers=headers, files=files)
+    assert response.status_code == 201
+    video_id = response.json()["id"]
+
+    _index(client, video_id)
+
+    body = client.get(f"/api/v1/videos/{video_id}", headers=headers).json()
+    assert body["status"] == "ready"
+    assert body["frames_total"] == 0
+    assert body["frames_indexed"] == 0
+    assert body["duration_seconds"] == pytest.approx(3.0, abs=0.5)
+
+    async def count_frames() -> int:
+        async with engine.connect() as connection:
+            return await connection.scalar(
+                text("SELECT count(*) FROM frames WHERE video_id = :vid"),
+                {"vid": uuid.UUID(video_id)},
+            )
+
+    assert client.portal.call(count_frames) == 0
+
+
+def test_probe_file_flags_audio_only_recordings(
+    audio_only_bytes: bytes, clip_bytes: bytes, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """cv2 can't open audio-only files; the ffmpeg fallback tells them apart.
+
+    A mic-only recording raises AudioOnlyFile with its real duration, while a
+    file with a video track (or a non-media blob) stays a genuine failure.
+    """
+    workdir = tmp_path_factory.mktemp("probe")
+    audio = workdir / "voice.webm"
+    audio.write_bytes(audio_only_bytes)
+
+    with pytest.raises(pipeline.AudioOnlyFile) as exc_info:
+        pipeline.probe_file(audio)
+    assert exc_info.value.duration == pytest.approx(3.0, abs=0.5)
+
+    # The fallback distinguishes the three cases by what ffmpeg sees.
+    assert pipeline._probe_audio_only_duration(audio) == pytest.approx(3.0, abs=0.5)
+    video = workdir / "scenes.avi"
+    video.write_bytes(clip_bytes)
+    assert pipeline._probe_audio_only_duration(video) is None  # has a video track
+    junk = workdir / "junk.mp4"
+    junk.write_bytes(b"this is not a video at all")
+    assert pipeline._probe_audio_only_duration(junk) is None  # unreadable, not audio-only
 
 
 def test_failed_index_marks_video_failed(

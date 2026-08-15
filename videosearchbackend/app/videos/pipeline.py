@@ -27,7 +27,9 @@ import asyncio
 import contextlib
 import logging
 import math
+import re
 import shutil
+import subprocess
 import tempfile
 import time
 import uuid
@@ -41,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.session import SessionFactory
 from app.videos import embedder, transcribe
+from app.videos.clips import ffmpeg_binary
 from app.videos.models import Frame, TranscriptSegment, Video
 from app.videos.storage import storage
 
@@ -55,6 +58,58 @@ _EMBED_CHUNK = 32
 _CHUNK = "chunk"
 _DONE = "done"
 _ERROR = "error"
+
+
+class AudioOnlyFile(Exception):
+    """The file has an audio track but no video — nothing to frame-index.
+
+    Raised by :func:`probe_file` when OpenCV can't open the file and ffmpeg
+    confirms it simply has no video stream (a mic-only recording saved as
+    .webm, for instance). The pipeline then skips frame extraction entirely
+    and marks the video ready once its audio is transcribed.
+    """
+
+    def __init__(self, *, duration: float) -> None:
+        super().__init__(f"no video track (duration={duration:.2f}s)")
+        self.duration = duration
+
+
+# ffmpeg's `-i` output marks each stream as "Stream #0:0(eng): Video: …" or
+# "… Audio: …" and the container's length as "Duration: HH:MM:SS.mmm".
+_ANY_STREAM = re.compile(r"Stream #\d+:\d+")
+_VIDEO_STREAM = re.compile(r"Stream #\d+:\d+.*: Video:")
+_DURATION = re.compile(r"Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+def _probe_audio_only_duration(path: Path) -> float | None:
+    """Duration (seconds) of an audio-only file, or None when it isn't one.
+
+    ``cv2.VideoCapture`` cannot open audio-only containers, so when the
+    OpenCV probe fails the pipeline asks ffmpeg whether the file simply has
+    no video track. Returns the duration when the file is readable media
+    without a video stream, and None when ffmpeg couldn't read it at all or
+    the file does carry a video track — both of those are genuine failures,
+    not a skipped index.
+    """
+    result = subprocess.run(  # noqa: S603 - fixed binary, no shell
+        [ffmpeg_binary(), "-hide_banner", "-i", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    stderr = result.stderr or ""
+    # A non-media blob produces no container header at all (no Duration, no
+    # streams) — that's an unreadable file, not an audio-only one.
+    if not _DURATION.search(stderr) and not _ANY_STREAM.search(stderr):
+        return None
+    # It has a video track: cv2 failing to open it is a real problem.
+    if _VIDEO_STREAM.search(stderr):
+        return None
+    match = _DURATION.search(stderr)
+    if match is None:
+        return 0.0
+    hours, minutes, seconds = (float(part) for part in match.groups())
+    return hours * 3600 + minutes * 60 + seconds
 
 
 def _probe(cap) -> tuple[float, int]:
@@ -77,6 +132,12 @@ def probe_file(path: Path) -> tuple[float, float, int]:
     """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
+        # cv2 can't open audio-only containers. When ffmpeg confirms the file
+        # is media without a video track, there is nothing to frame-index —
+        # the caller marks the video ready once its audio is transcribed.
+        duration = _probe_audio_only_duration(path)
+        if duration is not None:
+            raise AudioOnlyFile(duration=duration)
         raise RuntimeError(f"Could not open video file: {path.name}")
     try:
         fps, total_frames = _probe(cap)
@@ -373,7 +434,24 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
             # poll shows progress from the first tick. With scene-aware sampling
             # this is the fixed-rate ceiling; the consumer re-projects it per
             # chunk from the keep/candidate ratio.
-            duration, step, expected = await asyncio.to_thread(probe_file, local_path)
+            try:
+                duration, step, expected = await asyncio.to_thread(probe_file, local_path)
+            except AudioOnlyFile as exc:
+                # No video track (a mic-only recording, say): there is nothing
+                # to frame-index. Record the duration, mark the video ready
+                # immediately, and transcribe its audio — for a recording, the
+                # transcript is the point. Transcription is its own task, as in
+                # the normal path below, so the `ready` row lands now and the
+                # `finally` block keeps the file alive until it finishes.
+                video.duration_seconds = exc.duration
+                video.frames_total = 0
+                video.frames_indexed = 0
+                video.status = "ready"
+                await db.commit()
+                transcript_task = asyncio.create_task(
+                    _run_transcription(video_id, local_path, exc.duration)
+                )
+                return
             video.duration_seconds = duration
             video.frames_total = expected
             await db.commit()
