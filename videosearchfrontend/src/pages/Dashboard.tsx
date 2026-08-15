@@ -25,6 +25,7 @@ import {
   SearchIcon,
   TrashIcon,
   UploadIcon,
+  WaveIcon,
 } from '../components/Icons'
 import {
   compactNumber,
@@ -228,6 +229,13 @@ export default function Dashboard() {
                           Recording
                         </Chip>
                       )}
+                      {/* Audio-only recordings have no frames to scene-search
+                          — the tag keeps them distinct from screen captures. */}
+                      {video.hasVideo === false && (
+                        <Chip tone="neutral" icon={<WaveIcon />}>
+                          Audio
+                        </Chip>
+                      )}
 
                       {!API_ENABLED && !sourceFor(video.id) && (
                         <Chip title="The file handle was lost when the tab reloaded — re-attach it on the search page to play clips back.">
@@ -239,15 +247,17 @@ export default function Dashboard() {
                         <CollectionMenu video={video} collections={collections} />
                       )}
 
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => navigate(`/search?v=${video.id}`)}
-                        className="[&_svg]:size-4"
-                      >
-                        <SearchIcon />
-                        Search
-                      </Button>
+                      {video.hasVideo !== false && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => navigate(`/search?v=${video.id}`)}
+                          className="[&_svg]:size-4"
+                        >
+                          <SearchIcon />
+                          Search
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="sm"

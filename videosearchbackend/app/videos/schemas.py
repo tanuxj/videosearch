@@ -21,6 +21,10 @@ class VideoOut(BaseModel):
     # plain uploads in the library.
     source: str = "upload"
     error: str | None = None
+    # Whether the file has a video track. False for audio-only recordings
+    # (nothing to frame-index — the frontend keeps them out of search); null
+    # until the pipeline has probed the file.
+    has_video: bool | None = None
     frames_total: int
     frames_indexed: int
     # Transcription's own lifecycle — `pending` | `processing` | `ready` |

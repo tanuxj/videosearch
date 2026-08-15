@@ -141,6 +141,7 @@ def test_upload_then_index_marks_video_ready(
     assert body["status"] == "ready"
     assert body["frames_total"] == 3
     assert body["frames_indexed"] == 3
+    assert body["has_video"] is True
     assert body["duration_seconds"] == pytest.approx(3.0, abs=0.5)
 
 
@@ -194,6 +195,9 @@ def test_audio_only_upload_is_ready_without_frames(
     assert body["status"] == "ready"
     assert body["frames_total"] == 0
     assert body["frames_indexed"] == 0
+    # Audio-only: the frontend uses this flag to keep the recording out of
+    # the scene-search picker — there are no frames to search.
+    assert body["has_video"] is False
     assert body["duration_seconds"] == pytest.approx(3.0, abs=0.5)
 
     async def count_frames() -> int:

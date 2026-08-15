@@ -340,6 +340,14 @@ export default function Record() {
       const file = new File([blob], `Recording ${stamp}.webm`, {
         type: blob.type || 'video/webm',
       })
+      // Screen captures (and audio-only saves that kept a webcam) carry a
+      // video track; a plain mic recording is audio-only. Audio-only saves
+      // have no frames to scene-search, so they land on the library's
+      // Recordings page instead of the search box.
+      const hasVideo = isScreen || Boolean(config?.cameraId)
+      const next = hasVideo
+        ? (id: string) => `/search?v=${id}`
+        : () => '/recordings'
       if (!API_ENABLED) {
         // Demo mode: attach the blob for playback and persist the record.
         const id = crypto.randomUUID()
@@ -355,15 +363,17 @@ export default function Record() {
           status: 'ready',
           // Marked so the library can tag it as a recording.
           source: 'recording',
+          // Audio-only saves have no video track to search.
+          hasVideo,
           transcriptStatus: 'skipped',
           collectionIds: [],
           createdAt: new Date().toISOString(),
         }
         await saveVideo(user.id, record)
-        navigate(`/search?v=${id}`)
+        navigate(next(id))
       } else {
         const record = await createVideoApi(file, { source: 'recording' })
-        navigate(`/search?v=${record.id}`)
+        navigate(next(record.id))
       }
     } catch (caught) {
       setSaveError(

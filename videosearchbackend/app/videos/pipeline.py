@@ -444,6 +444,7 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
                 # the normal path below, so the `ready` row lands now and the
                 # `finally` block keeps the file alive until it finishes.
                 video.duration_seconds = exc.duration
+                video.has_video = False
                 video.frames_total = 0
                 video.frames_indexed = 0
                 video.status = "ready"
@@ -453,6 +454,7 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
                 )
                 return
             video.duration_seconds = duration
+            video.has_video = True
             video.frames_total = expected
             await db.commit()
 

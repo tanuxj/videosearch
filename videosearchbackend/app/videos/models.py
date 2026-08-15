@@ -25,6 +25,7 @@ from datetime import datetime
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -88,6 +89,12 @@ class Video(Base, TimestampMixin):
         String(16), nullable=False, default="upload", server_default=text("'upload'")
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Whether the file carries a video track. Set at probe time: True for
+    # normal videos, False for audio-only recordings (a mic-only save has
+    # nothing to frame-index). Null until the pipeline has probed the file
+    # (and for rows that predate the column) — the frontend treats null as
+    # "has video" so pre-existing videos stay searchable.
+    has_video: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # R2 object key (e.g. "{owner_id}/{video_id}.mp4") or local path.
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
     poster_key: Mapped[str | None] = mapped_column(String(512), nullable=True)

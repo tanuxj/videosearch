@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import { useLocation } from '../lib/router'
+import { useLocation, useNavigate } from '../lib/router'
 import { useAuth } from '../lib/auth'
 import {
   attachSource,
@@ -30,7 +30,14 @@ import { timecode } from '../lib/format'
 export default function Search() {
   const { user } = useAuth()
   const { query } = useLocation()
+  const navigate = useNavigate()
   const videos = useVideos(user?.id)
+
+  // Audio-only recordings (mic-only saves) have no frames to scene-search, so
+  // they stay in the library — the picker only offers videos with a picture
+  // track. `hasVideo` is undefined until the server probes the file, which is
+  // treated as "has video" so processing uploads don't flicker out.
+  const searchable = videos.filter((video) => video.hasVideo !== false)
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [prompt, setPrompt] = useState('')
@@ -55,21 +62,21 @@ export default function Search() {
 
   // Pick the video from ?v=, else the newest one in the library.
   useEffect(() => {
-    if (videos.length === 0) {
+    if (searchable.length === 0) {
       setSelectedId(null)
       return
     }
     const wanted = query.get('v')
     setSelectedId((current) => {
-      if (current && videos.some((video) => video.id === current)) return current
-      if (wanted && videos.some((video) => video.id === wanted)) return wanted
-      return videos[0]!.id
+      if (current && searchable.some((video) => video.id === current)) return current
+      if (wanted && searchable.some((video) => video.id === wanted)) return wanted
+      return searchable[0]!.id
     })
-  }, [videos, query])
+  }, [searchable, query])
 
   const selected: VideoRecord | null = useMemo(
-    () => videos.find((video) => video.id === selectedId) ?? null,
-    [videos, selectedId],
+    () => searchable.find((video) => video.id === selectedId) ?? null,
+    [searchable, selectedId],
   )
 
   // Switching videos invalidates the previous results.
@@ -246,7 +253,7 @@ export default function Search() {
         <Card className="p-3 sm:p-4">
           <div className="flex flex-wrap items-center gap-2">
             <VideoSelect
-              videos={videos}
+              videos={searchable}
               selectedId={selectedId}
               onSelect={setSelectedId}
               onUpload={() => setUploadOpen(true)}
@@ -490,12 +497,18 @@ export default function Search() {
         <div className="mx-auto mt-10 w-full max-w-[900px]">
           <div className="mb-5 text-center">
             <h2 className="text-[19px] font-semibold tracking-[-0.02em] text-ink">
-              {selected ? 'Try describing…' : 'Start by adding a video'}
+              {selected
+                ? 'Try describing…'
+                : videos.length > 0
+                  ? 'Nothing to search yet'
+                  : 'Start by adding a video'}
             </h2>
             <p className="mx-auto mt-2 max-w-[58ch] text-[14px] leading-relaxed text-ink-dim">
               {selected
                 ? 'Matching runs on what the camera saw, so describe the visuals rather than the dialogue.'
-                : 'Once a video is indexed, every second of it becomes searchable by description.'}
+                : videos.length > 0
+                  ? 'Your library only has audio recordings — they have no frames to search. Head to the library to read their transcripts.'
+                  : 'Once a video is indexed, every second of it becomes searchable by description.'}
             </p>
           </div>
 
@@ -520,6 +533,18 @@ export default function Search() {
                     </button>
                   </Card>
               ))}
+            </div>
+          ) : videos.length > 0 ? (
+            <div className="flex justify-center">
+              <Button
+                variant="secondary"
+                size="lg"
+                onClick={() => navigate('/recordings')}
+                className="[&_svg]:size-[18px]"
+              >
+                <MicIcon />
+                Open recordings
+              </Button>
             </div>
           ) : (
             <div className="flex justify-center">

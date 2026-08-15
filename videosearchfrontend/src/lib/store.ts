@@ -71,6 +71,13 @@ export type VideoRecord = {
   status: VideoStatus
   /** How the video got here — the Record tab's saves are `recording`. */
   source: VideoSource
+  /**
+   * Whether the file has a video track. False for audio-only recordings —
+   * they have no frames, so there is nothing to scene-search and they stay
+   * in the library. Undefined until the server has probed the file (or for
+   * old rows), which the search page treats as "has video".
+   */
+  hasVideo?: boolean
   transcriptStatus: TranscriptStatus
   /** Detected spoken language (ISO-639-1 where known) — the track's srclang. */
   language?: string
@@ -96,6 +103,7 @@ type ApiVideo = {
   duration_seconds: number | null
   status: VideoStatus
   source?: string
+  has_video?: boolean | null
   error: string | null
   frames_total: number
   frames_indexed: number
@@ -159,6 +167,9 @@ function toRecord(video: ApiVideo): VideoRecord {
     // An older backend predates the column — a video that predates it is a
     // plain upload by definition.
     source: (video.source as VideoSource | undefined) ?? 'upload',
+    // Null until the pipeline probes the file — treat as "has video" so
+    // pre-existing uploads stay searchable.
+    hasVideo: video.has_video ?? undefined,
     // An older backend omits these entirely — treat that as "no transcript
     // coming" rather than leaving the UI polling forever.
     transcriptStatus: video.transcript_status ?? 'skipped',

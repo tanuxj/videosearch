@@ -74,9 +74,10 @@ type Props = {
   video: VideoRecord | null
   /**
    * Called with a segment's time range when a line is clicked — the Search
-   * page turns it into a playable clip.
+   * page turns it into a playable clip. Omit on pages without a player
+   * (Recordings), where the transcript is read-only.
    */
-  onSeek: (segment: TranscriptSegment) => void
+  onSeek?: (segment: TranscriptSegment) => void
 }
 
 export function TranscriptPanel({ video, onSeek }: Props) {
@@ -197,7 +198,9 @@ export function TranscriptPanel({ video, onSeek }: Props) {
       title="Transcript"
       subtitle={
         status === 'ready'
-          ? `${segments.length} ${segments.length === 1 ? 'line' : 'lines'} · click any line to play it`
+          ? onSeek
+            ? `${segments.length} ${segments.length === 1 ? 'line' : 'lines'} · click any line to play it`
+            : `${segments.length} ${segments.length === 1 ? 'line' : 'lines'}`
           : undefined
       }
       actions={
@@ -275,18 +278,29 @@ export function TranscriptPanel({ video, onSeek }: Props) {
         <ol className="max-h-[22rem] divide-y divide-line overflow-y-auto">
           {visible.map((segment, index) => (
             <li key={`${segment.start}-${index}`}>
-              <button
-                type="button"
-                onClick={() => onSeek(segment)}
-                className="flex w-full cursor-pointer items-baseline gap-3 px-5 py-2.5 text-left transition-colors hover:bg-surface-sunk"
-              >
-                <span className="shrink-0 font-mono text-[11.5px] text-brand tabular-nums">
-                  {timecode(segment.start)}
-                </span>
-                <span className="text-[13.5px] leading-relaxed text-ink">
-                  {highlight(segment.text, filter.trim())}
-                </span>
-              </button>
+              {onSeek ? (
+                <button
+                  type="button"
+                  onClick={() => onSeek(segment)}
+                  className="flex w-full cursor-pointer items-baseline gap-3 px-5 py-2.5 text-left transition-colors hover:bg-surface-sunk"
+                >
+                  <span className="shrink-0 font-mono text-[11.5px] text-brand tabular-nums">
+                    {timecode(segment.start)}
+                  </span>
+                  <span className="text-[13.5px] leading-relaxed text-ink">
+                    {highlight(segment.text, filter.trim())}
+                  </span>
+                </button>
+              ) : (
+                <div className="flex items-baseline gap-3 px-5 py-2.5">
+                  <span className="shrink-0 font-mono text-[11.5px] text-brand tabular-nums">
+                    {timecode(segment.start)}
+                  </span>
+                  <span className="text-[13.5px] leading-relaxed text-ink">
+                    {highlight(segment.text, filter.trim())}
+                  </span>
+                </div>
+              )}
             </li>
           ))}
         </ol>
