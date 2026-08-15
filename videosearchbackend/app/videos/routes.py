@@ -45,6 +45,7 @@ from app.videos.schemas import (
     PresignUploadIn,
     PresignUploadOut,
     SavedClipListOut,
+    ShareLinkOut,
     StreamUrlOut,
     TranscriptOut,
     TranscriptSegmentOut,
@@ -747,6 +748,56 @@ async def stream_url(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> S
         url=f"{settings.api_v1_prefix}/videos/{video_id}/stream",
         worker=False,
     )
+
+
+@router.get(
+    "/{video_id}/share",
+    response_model=ShareLinkOut,
+    summary="Get (or create) a video's share link",
+    description=(
+        "Mints the video's public share token on first call and returns the "
+        "app-relative `/share/<token>` path. The same token comes back every "
+        "time, so the link is stable. Sharing is opt-in: an unshared video "
+        "has no token until this is called."
+    ),
+    responses={404: {"description": "Video not found"}},
+)
+async def get_share_link(
+    user: CurrentUser,
+    db: DbSession,
+    video_id: uuid.UUID,
+) -> ShareLinkOut:
+    try:
+        token = await videos_service.get_or_create_share_token(
+            db,
+            owner_id=user.id,
+            video_id=video_id,
+        )
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+    return ShareLinkOut(token=token, url=f"/share/{token}")
+
+
+@router.delete(
+    "/{video_id}/share",
+    response_model=MessageResponse,
+    summary="Revoke a video's share link",
+    description=(
+        "Clears the video's share token, so every outstanding link dies at "
+        "once. Calling it on an unshared video is a no-op (still 200)."
+    ),
+    responses={404: {"description": "Video not found"}},
+)
+async def revoke_share_link(
+    user: CurrentUser,
+    db: DbSession,
+    video_id: uuid.UUID,
+) -> MessageResponse:
+    try:
+        await videos_service.unshare_video(db, owner_id=user.id, video_id=video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+    return MessageResponse(detail="Share link revoked")
 
 
 @router.get(

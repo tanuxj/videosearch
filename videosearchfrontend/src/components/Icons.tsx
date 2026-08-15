@@ -98,6 +98,15 @@ export const DownloadIcon = ({ className }: Props) => (
   </Stroke>
 )
 
+// Share: an arrow out of a tray — "hand this to someone" rather than "store".
+export const ShareIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <path d="M12 14.5V4" />
+    <path d="M8 8L12 4l4 4" />
+    <path d="M5 13.5v4A2.5 2.5 0 007.5 20h9a2.5 2.5 0 002.5-2.5v-4" />
+  </Stroke>
+)
+
 // Film strip: outer frame plus two perforation columns. The old version drew a
 // full centre cross-hatch, which turned into a muddy grid at small sizes.
 export const FilmIcon = ({ className }: Props) => (

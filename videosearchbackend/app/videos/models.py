@@ -95,6 +95,13 @@ class Video(Base, TimestampMixin):
     # (and for rows that predate the column) — the frontend treats null as
     # "has video" so pre-existing videos stay searchable.
     has_video: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Public share token — the unguessable key in a `/share/<token>` link.
+    # Null until the owner shares the video the first time; clearing it (the
+    # unshare route) revokes every outstanding link at once. The unique index
+    # is what makes the token a lookup key rather than a filter.
+    share_token: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
     # R2 object key (e.g. "{owner_id}/{video_id}.mp4") or local path.
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
     poster_key: Mapped[str | None] = mapped_column(String(512), nullable=True)

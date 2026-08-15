@@ -7,6 +7,7 @@ tests never touch a real R2 bucket.
 
 import io
 import math
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -402,6 +403,131 @@ def test_stream_url_someone_elses_video_is_404(client: TestClient) -> None:
 
     response = client.get(
         f"/api/v1/videos/{video_id}/stream-url",
+        headers={"Authorization": f"Bearer {_signin_other(client)}"},
+    )
+    assert response.status_code == 404
+
+
+# ── Share links ────────────────────────────────────────────────
+
+
+def test_share_link_mints_token_and_is_stable(client: TestClient) -> None:
+    headers = _auth_headers(client)
+    video_id = _upload(client, headers)["id"]
+
+    first = client.get(f"/api/v1/videos/{video_id}/share", headers=headers)
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["url"] == f"/share/{body['token']}"
+    # token_urlsafe(32) → 43 chars of base64url.
+    assert len(body["token"]) == 43
+
+    # Asking again returns the same link — the token lives on the row.
+    second = client.get(f"/api/v1/videos/{video_id}/share", headers=headers)
+    assert second.json()["token"] == body["token"]
+
+
+# Sharing is opt-in: an upload has no token until the owner asks for one.
+def test_upload_starts_unshared(client: TestClient) -> None:
+    headers = _auth_headers(client)
+    video_id = _upload(client, headers)["id"]
+
+    response = client.get(f"/api/v1/videos/{video_id}", headers=headers)
+    assert response.status_code == 200
+    assert "share_token" not in response.json()
+
+
+def test_share_link_requires_auth(client: TestClient) -> None:
+    response = client.get(
+        f"/api/v1/videos/{uuid.uuid4()}/share",
+    )
+    assert response.status_code == 401
+
+
+def test_share_link_someone_elses_video_is_404(client: TestClient) -> None:
+    mine = _auth_headers(client)
+    video_id = _upload(client, mine)["id"]
+    _auth_headers(client, email="other@example.com", name="Other Person")
+
+    response = client.get(
+        f"/api/v1/videos/{video_id}/share",
+        headers={"Authorization": f"Bearer {_signin_other(client)}"},
+    )
+    assert response.status_code == 404
+
+
+def test_public_share_returns_metadata_without_auth(client: TestClient) -> None:
+    headers = _auth_headers(client)
+    video_id = _upload(client, headers)["id"]
+    token = client.get(f"/api/v1/videos/{video_id}/share", headers=headers).json()["token"]
+
+    # No Authorization header at all — this is the recipient's view.
+    response = client.get(f"/api/v1/shares/{token}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == video_id
+    assert body["name"] == "clip.mp4"
+    assert body["status"] == "processing"
+    assert body["source"] == "upload"
+    assert body["stream_url"] == f"/api/v1/shares/{token}/stream"
+    # The public payload never leaks the owner or storage internals.
+    assert "owner_id" not in body
+    assert "storage_key" not in body
+
+
+def test_public_share_streams_without_auth(client: TestClient) -> None:
+    headers = _auth_headers(client)
+    video_id = _upload(client, headers)["id"]
+    token = client.get(f"/api/v1/videos/{video_id}/share", headers=headers).json()["token"]
+
+    response = client.get(f"/api/v1/shares/{token}/stream")
+    assert response.status_code == 200
+    assert response.content == FAKE_MP4
+    assert response.headers["content-type"].startswith("video/")
+    assert "attachment" not in response.headers.get("content-disposition", "")
+
+    # Range support — the public player must be able to seek too.
+    ranged = client.get(f"/api/v1/shares/{token}/stream", headers={"Range": "bytes=0-9"})
+    assert ranged.status_code == 206
+    assert ranged.content == FAKE_MP4[:10]
+
+
+def test_public_share_unknown_token_is_404(client: TestClient) -> None:
+    assert client.get("/api/v1/shares/no-such-token").status_code == 404
+    assert client.get("/api/v1/shares/no-such-token/stream").status_code == 404
+    assert client.get("/api/v1/shares/no-such-token/transcript").status_code == 404
+    assert client.get("/api/v1/shares/no-such-token/captions.vtt").status_code == 404
+
+
+def test_unshare_revokes_the_link(client: TestClient) -> None:
+    headers = _auth_headers(client)
+    video_id = _upload(client, headers)["id"]
+    token = client.get(f"/api/v1/videos/{video_id}/share", headers=headers).json()["token"]
+    assert client.get(f"/api/v1/shares/{token}").status_code == 200
+
+    response = client.delete(f"/api/v1/videos/{video_id}/share", headers=headers)
+    assert response.status_code == 200
+
+    # The link is dead for the public…
+    assert client.get(f"/api/v1/shares/{token}").status_code == 404
+    assert client.get(f"/api/v1/shares/{token}/stream").status_code == 404
+    # …but the video itself is untouched for its owner.
+    assert client.get(f"/api/v1/videos/{video_id}", headers=headers).status_code == 200
+
+    # Sharing again mints a fresh token — the old link stays revoked.
+    reshared = client.get(f"/api/v1/videos/{video_id}/share", headers=headers).json()
+    assert reshared["token"] != token
+    assert client.get(f"/api/v1/shares/{reshared['token']}").status_code == 200
+    assert client.get(f"/api/v1/shares/{token}").status_code == 404
+
+
+def test_unshare_someone_elses_video_is_404(client: TestClient) -> None:
+    mine = _auth_headers(client)
+    video_id = _upload(client, mine)["id"]
+    _auth_headers(client, email="other@example.com", name="Other Person")
+
+    response = client.delete(
+        f"/api/v1/videos/{video_id}/share",
         headers={"Authorization": f"Bearer {_signin_other(client)}"},
     )
     assert response.status_code == 404

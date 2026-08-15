@@ -6,11 +6,13 @@ the heavy I/O on a threadpool, so the async service stays responsive.
 """
 
 import logging
+import secrets
 import uuid
 from pathlib import Path
 
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collections.models import CollectionVideo
@@ -317,6 +319,70 @@ async def get_video(db: AsyncSession, owner_id: uuid.UUID, video_id: uuid.UUID) 
     video = await db.get(Video, video_id)
     if video is None or video.owner_id != owner_id:
         raise VideoNotFound(video_id)
+    return video
+
+
+async def get_or_create_share_token(
+    db: AsyncSession,
+    *,
+    owner_id: uuid.UUID,
+    video_id: uuid.UUID,
+) -> str:
+    """The video's share token, minting it on first request.
+
+    Sharing is opt-in and lazy: the token is created the first time the owner
+    asks for a link, not at upload time, so an unshared video never carries
+    one. Asking again returns the same token — the link is stable. A collision
+    on the unique index (astronomically unlikely, but free to handle) retries
+    with a fresh token.
+    """
+    video = await get_video(db, owner_id, video_id)
+    if video.share_token:
+        return video.share_token
+
+    for _ in range(3):
+        token = secrets.token_urlsafe(32)
+        video.share_token = token
+        try:
+            await db.commit()
+            await db.refresh(video)
+            logger.info("Video shared: %s", video_id)
+            return token
+        except IntegrityError:
+            await db.rollback()
+    raise VideoError("could not mint a unique share token")
+
+
+async def unshare_video(
+    db: AsyncSession,
+    *,
+    owner_id: uuid.UUID,
+    video_id: uuid.UUID,
+) -> None:
+    """Revoke a video's share link by clearing its token.
+
+    Every outstanding link dies at once — the public routes look the video up
+    by token, and a cleared token matches nothing.
+    """
+    video = await get_video(db, owner_id, video_id)
+    if video.share_token is None:
+        return
+    video.share_token = None
+    await db.commit()
+    await db.refresh(video)
+    logger.info("Video unshared: %s", video_id)
+
+
+async def get_shared_video(db: AsyncSession, token: str) -> Video:
+    """A video by its share token — the one public lookup in the library.
+
+    Raises `VideoNotFound` for an unknown or revoked token (same 404 either
+    way, so a revoked link is indistinguishable from one that never existed).
+    """
+    result = await db.execute(select(Video).where(Video.share_token == token))
+    video = result.scalar_one_or_none()
+    if video is None:
+        raise VideoNotFound(token)
     return video
 
 

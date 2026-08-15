@@ -18,6 +18,7 @@ from app.history.routes import router as history_router
 from app.videos import embedder
 from app.videos.routes import router as videos_router
 from app.videos.search import router as clip_search_router
+from app.videos.share import router as shares_router
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ app.add_middleware(
 app.include_router(health.router, prefix=settings.api_v1_prefix, tags=["health"])
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
 app.include_router(videos_router, prefix=settings.api_v1_prefix)
+app.include_router(shares_router, prefix=settings.api_v1_prefix)
 app.include_router(collections_router, prefix=settings.api_v1_prefix)
 app.include_router(clip_search_router, prefix=settings.api_v1_prefix)
 app.include_router(history_router, prefix=settings.api_v1_prefix)

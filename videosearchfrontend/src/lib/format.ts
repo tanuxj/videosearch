@@ -1,3 +1,25 @@
+/**
+ * Parse a timecode into seconds: `90`, `1:30`, `1:02:03.5`.
+ *
+ * Used for `?t=` share links, which accept plain seconds or `m:ss`. Returns
+ * null for anything that isn't a clean timecode (empty, negative, too many
+ * colons, non-numeric) so callers can fall back to "start at 0".
+ */
+export function parseTimecode(value: string | null): number | null {
+  const trimmed = value?.trim() ?? ''
+  if (!trimmed) return null
+  const parts = trimmed.split(':')
+  if (parts.length > 3) return null
+  if (!parts.every((part) => /^\d+(\.\d+)?$/.test(part))) return null
+  let seconds = 0
+  for (const part of parts) {
+    const number = Number(part)
+    if (!Number.isFinite(number)) return null
+    seconds = seconds * 60 + number
+  }
+  return seconds
+}
+
 /** Seconds → `m:ss` (or `h:mm:ss` past an hour). */
 export function timecode(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds))

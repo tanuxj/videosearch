@@ -6,6 +6,7 @@ import type { VideoRecord } from '../lib/store'
 import type { ReactNode } from 'react'
 import { Modal } from './Modal'
 import { ClipTrimmer, type Range } from './ClipTrimmer'
+import { ShareButton } from './ShareButton'
 import { Button } from './ui/Button'
 import {
   ArrowLeftIcon,
@@ -14,7 +15,7 @@ import {
   DownloadIcon,
   FilmIcon,
 } from './Icons'
-import { timecode } from '../lib/format'
+import { timecode, timecodeExact } from '../lib/format'
 
 /**
  * Mirrors `MAX_CLIP_SECONDS` in the backend's video routes. The server rejects
@@ -280,6 +281,14 @@ export function ClipLightbox({
                 <DownloadIcon />
                 {downloading ? 'Preparing…' : 'Download clip'}
               </Button>
+            )}
+
+            {API_ENABLED && video && (
+              <ShareButton
+                videoId={video.id}
+                suffix={`?t=${timecodeExact(currentTime)}`}
+                withText
+              />
             )}
 
             {downloadError && (

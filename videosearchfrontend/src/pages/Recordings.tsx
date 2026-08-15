@@ -5,6 +5,7 @@ import { removeVideo, sourceFor, useVideos } from '../lib/store'
 import { API_ENABLED } from '../lib/http'
 import { AppShell } from '../components/Shell'
 import { UploadDialog } from '../components/UploadDialog'
+import { ShareButton } from '../components/ShareButton'
 import { TranscriptPanel } from '../components/TranscriptPanel'
 import { Button } from '../components/ui/Button'
 import {
@@ -169,6 +170,8 @@ export default function Recordings() {
                           Search
                         </Button>
                       )}
+
+                      {API_ENABLED && <ShareButton videoId={video.id} />}
 
                       <Button
                         variant="ghost"

@@ -46,6 +46,40 @@ class VideoListOut(BaseModel):
     count: int = Field(description="Number of videos returned.")
 
 
+class ShareLinkOut(BaseModel):
+    """The share link for a video, minted lazily on first request.
+
+    `url` is the app-relative share path (`/share/<token>`) — the frontend
+    prefixes its own origin. The token is unguessable and survives on the row,
+    so asking again returns the same link instead of a new one; unsharing
+    clears it and revokes every outstanding link.
+    """
+
+    token: str
+    url: str = Field(description="App-relative share path, e.g. `/share/abc…`.")
+
+
+class PublicShareOut(BaseModel):
+    """What the public share page may know about a video.
+
+    Deliberately a subset of `VideoOut` — no owner id, no error internals, no
+    collection membership. `stream_url` is the public, Range-aware playback
+    path so the share page can hand it straight to a `<video>` element.
+    """
+
+    id: uuid.UUID
+    name: str
+    duration_seconds: float | None = None
+    status: str
+    # How the video entered the library — `upload` | `recording` | `url`.
+    source: str = "upload"
+    has_video: bool | None = None
+    transcript_status: str
+    language: str | None = None
+    created_at: datetime
+    stream_url: str
+
+
 class StreamUrlOut(BaseModel):
     """A playback URL for a video.
 

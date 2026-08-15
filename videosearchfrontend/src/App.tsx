@@ -12,6 +12,7 @@ import History from './pages/History'
 import Search from './pages/Search'
 import Record from './pages/Record'
 import Recordings from './pages/Recordings'
+import Share from './pages/Share'
 
 const PROTECTED = new Set([
   '/dashboard',
@@ -65,6 +66,11 @@ function Routes() {
   if (!ready) return null
   if (!user && PROTECTED.has(route)) return null
   if (user && AUTH_ONLY.has(route)) return null
+
+  // Share pages are deliberately public — no session, no app shell.
+  if (route.startsWith('/share/')) {
+    return <Share token={route.slice('/share/'.length)} />
+  }
 
   switch (route) {
     case '/':

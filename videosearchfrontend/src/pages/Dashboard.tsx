@@ -6,6 +6,7 @@ import { useCollections } from '../lib/collections'
 import { API_ENABLED } from '../lib/http'
 import { AppShell } from '../components/Shell'
 import { UploadDialog } from '../components/UploadDialog'
+import { ShareButton } from '../components/ShareButton'
 import { SavedClips } from '../components/SavedClips'
 import { CollectionBar, CollectionMenu } from '../components/Collections'
 import { Button } from '../components/ui/Button'
@@ -246,6 +247,8 @@ export default function Dashboard() {
                       {API_ENABLED && (
                         <CollectionMenu video={video} collections={collections} />
                       )}
+
+                      {API_ENABLED && <ShareButton videoId={video.id} />}
 
                       {video.hasVideo !== false && (
                         <Button

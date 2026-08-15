@@ -285,6 +285,94 @@ export async function captionsObjectUrl(videoId: string): Promise<string> {
   return URL.createObjectURL(new Blob([blob], { type: 'text/vtt' }))
 }
 
+/* ── Share links ─────────────────────────────────────────── */
+
+/**
+ * What the public share page may know about a video — the server deliberately
+ * omits everything else (owner, storage internals, collection membership).
+ */
+export type PublicShare = {
+  id: string
+  name: string
+  /** Seconds — 0 until the server has probed the file. */
+  duration: number
+  status: string
+  source: string
+  /** False for audio-only recordings, which play in an `<audio>` element. */
+  hasVideo?: boolean
+  transcriptStatus: TranscriptStatus
+  language?: string
+  createdAt: string
+  /** Public, Range-aware playback path — safe to hand straight to a player. */
+  streamUrl: string
+}
+
+type ApiPublicShare = {
+  id: string
+  name: string
+  duration_seconds: number | null
+  status: string
+  source: string
+  has_video?: boolean | null
+  transcript_status?: TranscriptStatus
+  language?: string | null
+  created_at: string
+  stream_url: string
+}
+
+/**
+ * Mint (or fetch) a video's share link, then copy it to the clipboard.
+ *
+ * The backend creates the token lazily and keeps it stable, so calling this
+ * twice yields the same link. Returns the absolute URL the caller should copy.
+ */
+export async function shareLinkFor(videoId: string): Promise<string> {
+  const data = await apiFetch<{ token: string; url: string }>(
+    `/api/v1/videos/${videoId}/share`,
+  )
+  return `${window.location.origin}${data.url}`
+}
+
+/** Revoke a video's share link — every outstanding copy dies at once. */
+export async function unshareVideo(videoId: string): Promise<void> {
+  await apiFetch(`/api/v1/videos/${videoId}/share`, { method: 'DELETE' })
+}
+
+/**
+ * The public metadata for a shared video. No auth — this is the recipient's
+ * view, so `auth: false` keeps an expired session from hijacking the request.
+ */
+export async function fetchPublicShare(token: string): Promise<PublicShare> {
+  const data = await apiFetch<ApiPublicShare>(`/api/v1/shares/${token}`, {
+    auth: false,
+  })
+  return {
+    id: data.id,
+    name: data.name,
+    duration: data.duration_seconds ?? 0,
+    status: data.status,
+    source: data.source,
+    hasVideo: data.has_video ?? undefined,
+    transcriptStatus: data.transcript_status ?? 'skipped',
+    language: data.language ?? undefined,
+    createdAt: data.created_at,
+    streamUrl: data.stream_url,
+  }
+}
+
+/** The shared video's transcript, fetched without auth. */
+export async function fetchPublicTranscript(token: string): Promise<Transcript> {
+  const data = await apiFetch<ApiTranscript>(`/api/v1/shares/${token}/transcript`, {
+    auth: false,
+  })
+  return {
+    status: data.status ?? 'skipped',
+    language: data.language ?? undefined,
+    error: data.error ?? undefined,
+    segments: data.segments ?? [],
+  }
+}
+
 /** Save a Blob to the user's disk as a real file download. */
 export function saveBlob(blob: Blob, filename: string): void {
   const objectUrl = URL.createObjectURL(blob)
