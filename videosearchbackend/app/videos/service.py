@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collections.models import CollectionVideo
 from app.core.config import get_settings
-from app.videos.models import TranscriptSegment, Video
+from app.videos.models import VIDEO_SOURCES, TranscriptSegment, Video
 from app.videos.storage import storage
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,17 @@ def object_key(owner_id: uuid.UUID, video_id: uuid.UUID, ext: str) -> str:
     return f"{owner_id}/{video_id}{ext}"
 
 
+def _valid_source(source: str) -> str:
+    """Coerce a caller-supplied source to a known value.
+
+    The database check constraint rejects anything else at insert time, but a
+    500 from a constraint violation is a worse answer than quietly falling
+    back to `upload` — a stale client sending an unknown label is not a reason
+    to fail the upload.
+    """
+    return source if source in VIDEO_SOURCES else "upload"
+
+
 async def create_video(
     db: AsyncSession,
     *,
@@ -106,6 +117,7 @@ async def create_video(
     filename: str,
     size_bytes: int,
     content_type: str | None,
+    source: str = "upload",
     file,
 ) -> tuple[Video, Path | None]:
     """Persist an uploaded file and register its video row.
@@ -147,6 +159,7 @@ async def create_video(
             name=_safe_name(filename),
             size_bytes=size_bytes,
             status="processing",
+            source=_valid_source(source),
             storage_key=key,
         )
         db.add(video)
@@ -202,6 +215,7 @@ async def create_url_video(
         name=display_name(title, ext),
         size_bytes=0,
         status="processing",
+        source="url",
         storage_key=object_key(owner_id, video_id, ext),
     )
     db.add(video)
@@ -217,6 +231,7 @@ async def create_pending_video(
     owner_id: uuid.UUID,
     filename: str,
     size_bytes: int,
+    source: str = "upload",
 ) -> Video:
     """Reserve a `processing` video row before its bytes arrive.
 
@@ -234,6 +249,7 @@ async def create_pending_video(
         name=_safe_name(filename),
         size_bytes=size_bytes,
         status="processing",
+        source=_valid_source(source),
         storage_key=key,
     )
     db.add(video)

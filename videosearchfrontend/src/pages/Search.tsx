@@ -24,7 +24,7 @@ import { Card } from '../components/ui/Card'
 import { Chip, EmptyState, Panel } from '../components/ui/Data'
 import { Shimmer } from '../components/ui/Motion'
 import { Spinner } from '../components/AuthLayout'
-import { PlayIcon, SearchIcon, SparkIcon, UploadIcon } from '../components/Icons'
+import { MicIcon, PlayIcon, SearchIcon, SparkIcon, UploadIcon } from '../components/Icons'
 import { timecode } from '../lib/format'
 
 export default function Search() {
@@ -261,6 +261,11 @@ export default function Search() {
                   Indexing
                 </Chip>
               ))}
+            {selected?.source === 'recording' && (
+              <Chip tone="brand" icon={<MicIcon />}>
+                Recording
+              </Chip>
+            )}
           </div>
 
           <textarea

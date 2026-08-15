@@ -367,6 +367,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       frames: 0,
       framesTotal: expectedFrames,
       status: 'processing',
+      source: 'upload',
       // Demo mode has no server, so there is no transcription to wait for.
       transcriptStatus: 'skipped',
       // Collections are server-only; demo mode files nothing.
@@ -528,9 +529,11 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
         if (!next) return
         const { file, index } = next
         try {
-          const record = await createVideoApi(file, (loaded, total) => {
-            if (!aliveRef.current) return
-            update(index, { transfer: total > 0 ? loaded / total : 1 })
+          const record = await createVideoApi(file, {
+            onProgress: (loaded, total) => {
+              if (!aliveRef.current) return
+              update(index, { transfer: total > 0 ? loaded / total : 1 })
+            },
           })
           update(index, { video: record, transfer: 1 })
           if (targetCollection) {
@@ -625,7 +628,11 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
         )
         return
       }
-      await ingestServer((onProgress) => createVideoApi(file, onProgress), false, collection)
+      await ingestServer(
+        (onProgress) => createVideoApi(file, { onProgress }),
+        false,
+        collection,
+      )
       refreshCollections()
     } catch (caught) {
       if (!aliveRef.current) return

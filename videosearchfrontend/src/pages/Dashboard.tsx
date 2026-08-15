@@ -20,6 +20,7 @@ import {
   ClockIcon,
   FilmIcon,
   LayersIcon,
+  MicIcon,
   PlayIcon,
   SearchIcon,
   TrashIcon,
@@ -217,6 +218,14 @@ export default function Dashboard() {
                       ) : (
                         <Chip tone="warn" pulse>
                           Processing
+                        </Chip>
+                      )}
+
+                      {/* Saves from the Record tab carry a tag so they read
+                          differently from plain uploads at a glance. */}
+                      {video.source === 'recording' && (
+                        <Chip tone="brand" icon={<MicIcon />}>
+                          Recording
                         </Chip>
                       )}
 

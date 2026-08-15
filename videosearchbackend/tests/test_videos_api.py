@@ -32,9 +32,11 @@ def _upload(
     *,
     name: str = "clip.mp4",
     content: bytes = FAKE_MP4,
+    source: str | None = None,
 ) -> dict:
     files = {"file": (name, io.BytesIO(content), "video/mp4")}
-    response = client.post("/api/v1/videos", headers=headers, files=files)
+    data = {"source": source} if source is not None else None
+    response = client.post("/api/v1/videos", headers=headers, files=files, data=data)
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -65,6 +67,29 @@ def test_upload_creates_a_processing_video(client: TestClient) -> None:
     assert body["frames_indexed"] == 0
     assert body["error"] is None
     assert "storage_key" not in body
+
+
+def test_upload_defaults_to_source_upload(client: TestClient) -> None:
+    headers = _auth_headers(client)
+    assert _upload(client, headers)["source"] == "upload"
+
+
+def test_upload_tags_recordings(client: TestClient) -> None:
+    headers = _auth_headers(client)
+    body = _upload(client, headers, source="recording")
+    assert body["source"] == "recording"
+
+    # The tag survives the round trip through the list endpoint.
+    listing = client.get("/api/v1/videos", headers=headers).json()
+    assert [item["source"] for item in listing["items"]] == ["recording"]
+
+
+def test_upload_unknown_source_falls_back_to_upload(client: TestClient) -> None:
+    # A stale client sending an unknown label must not 500 on the check
+    # constraint — it degrades to a plain upload instead.
+    headers = _auth_headers(client)
+    body = _upload(client, headers, source="mystery")
+    assert body["source"] == "upload"
 
 
 def test_upload_strips_directory_traversal_from_name(client: TestClient) -> None:
@@ -492,6 +517,36 @@ def test_presign_requires_auth(client: TestClient) -> None:
     assert response.status_code == 401
 
 
+def test_presign_tags_recordings(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.videos.storage import storage
+
+    _enable_presign(monkeypatch, storage)
+    headers = _auth_headers(client)
+
+    response = client.post(
+        "/api/v1/videos/presign",
+        headers=headers,
+        json={
+            "filename": "clip.mp4",
+            "size_bytes": len(FAKE_MP4),
+            "source": "recording",
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["video"]["source"] == "recording"
+
+
+def test_presign_rejects_unknown_source(client: TestClient) -> None:
+    headers = _auth_headers(client)
+    response = client.post(
+        "/api/v1/videos/presign",
+        headers=headers,
+        json={"filename": "clip.mp4", "size_bytes": len(FAKE_MP4), "source": "mystery"},
+    )
+    # The schema whitelists the value, so a typo'd label fails fast.
+    assert response.status_code == 422
+
+
 @pytest.mark.parametrize("name", ["clip.txt", "notes.pdf"])
 def test_presign_rejects_unsupported_extensions(client: TestClient, name: str) -> None:
     headers = _auth_headers(client)
@@ -540,6 +595,8 @@ def test_presign_reserves_video_and_returns_upload_url(
     assert body["video"]["status"] == "processing"
     assert body["video"]["name"] == "clip.mp4"
     assert body["video"]["size_bytes"] == len(FAKE_MP4)
+    # Default source unless the client says otherwise.
+    assert body["video"]["source"] == "upload"
 
     # The URL was minted for the object key the row owns: scoped to the
     # owner's id, `.mp4` suffix, and both path segments are valid UUIDs —

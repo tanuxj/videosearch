@@ -47,6 +47,12 @@ EMBEDDING_DIM = 512
 
 VIDEO_STATUSES = ("processing", "ready", "failed")
 
+# How a video entered the library: a regular upload, a screen/mic recording
+# from the Record tab, or a URL import. Drives the little tag on the library
+# cards — a recording reads differently from an upload, even though both are
+# just indexed videos underneath.
+VIDEO_SOURCES = ("upload", "recording", "url")
+
 # Transcription runs on its own clock, so it has its own status:
 # `skipped` — no ASR endpoint configured, or the video carries no audio track.
 # `pending` → `processing` → `ready` / `failed` otherwise.
@@ -75,6 +81,11 @@ class Video(Base, TimestampMixin):
     # One of VIDEO_STATUSES.
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="processing", server_default=text("'processing'")
+    )
+    # One of VIDEO_SOURCES — how the video got here. Defaults to `upload`;
+    # the Record tab marks its saves as `recording`, URL imports as `url`.
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="upload", server_default=text("'upload'")
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # R2 object key (e.g. "{owner_id}/{video_id}.mp4") or local path.
@@ -114,6 +125,7 @@ class Video(Base, TimestampMixin):
         # writes VIDEO_STATUSES values.
         # The naming convention renders this as `ck_videos_status`.
         CheckConstraint(f"status IN {tuple(VIDEO_STATUSES)}", name="status"),
+        CheckConstraint(f"source IN {tuple(VIDEO_SOURCES)}", name="source"),
         CheckConstraint(
             f"transcript_status IN {tuple(TRANSCRIPT_STATUSES)}", name="transcript_status"
         ),

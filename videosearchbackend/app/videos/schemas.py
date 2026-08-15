@@ -16,6 +16,10 @@ class VideoOut(BaseModel):
     size_bytes: int
     duration_seconds: float | None = None
     status: str
+    # How the video entered the library — `upload` | `recording` | `url`.
+    # The frontend tags recordings with it so they read differently from
+    # plain uploads in the library.
+    source: str = "upload"
     error: str | None = None
     frames_total: int
     frames_indexed: int
@@ -179,6 +183,10 @@ class PresignUploadIn(BaseModel):
     filename: str
     size_bytes: int = Field(ge=0)
     content_type: str | None = None
+    # How the upload should be labelled — the Record tab sends `recording` so
+    # its saves are tagged in the library. Whitelisted to the same values the
+    # column check constraint accepts.
+    source: str = Field(default="upload", pattern="^(upload|recording|url)$")
 
 
 class PresignUploadOut(BaseModel):

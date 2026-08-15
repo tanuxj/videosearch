@@ -20,6 +20,7 @@ from fastapi import (
     APIRouter,
     BackgroundTasks,
     File,
+    Form,
     HTTPException,
     Query,
     Request,
@@ -133,6 +134,10 @@ async def upload_video(
         UploadFile,
         File(description="The video file (mp4, mov, webm, mkv, avi, m4v)"),
     ],
+    source: Annotated[
+        str,
+        Form(description="How this video entered the library (upload | recording | url)."),
+    ] = "upload",
 ) -> VideoOut:
     filename = file.filename or "video.mp4"
     try:
@@ -142,6 +147,7 @@ async def upload_video(
             filename=filename,
             size_bytes=file.size or 0,
             content_type=file.content_type,
+            source=source,
             file=file.file,
         )
     except videos_service.UnsupportedFileType as exc:
@@ -439,6 +445,7 @@ async def presign_upload(
         owner_id=user.id,
         filename=payload.filename,
         size_bytes=payload.size_bytes,
+        source=payload.source,
     )
 
     upload_url = await run_in_threadpool(
@@ -503,6 +510,7 @@ async def presign_multipart_upload(
         owner_id=user.id,
         filename=payload.filename,
         size_bytes=payload.size_bytes,
+        source=payload.source,
     )
 
     # Open the multipart upload and mint one URL per chunk. Any failure here

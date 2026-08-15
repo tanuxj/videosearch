@@ -353,6 +353,8 @@ export default function Record() {
           frames: 0,
           framesTotal: 0,
           status: 'ready',
+          // Marked so the library can tag it as a recording.
+          source: 'recording',
           transcriptStatus: 'skipped',
           collectionIds: [],
           createdAt: new Date().toISOString(),
@@ -360,7 +362,7 @@ export default function Record() {
         await saveVideo(user.id, record)
         navigate(`/search?v=${id}`)
       } else {
-        const record = await createVideoApi(file)
+        const record = await createVideoApi(file, { source: 'recording' })
         navigate(`/search?v=${record.id}`)
       }
     } catch (caught) {

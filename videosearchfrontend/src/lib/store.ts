@@ -30,6 +30,14 @@ export type SavedClip = Clip & {
 export type VideoStatus = 'processing' | 'ready' | 'failed'
 
 /**
+ * How a video entered the library — `upload` | `recording` | `url`.
+ *
+ * Saves from the Record tab send `recording` so the library can tag them;
+ * the tag is cosmetic, everything downstream treats them like any video.
+ */
+export type VideoSource = 'upload' | 'recording' | 'url'
+
+/**
  * Transcription's own lifecycle, tracked separately from `VideoStatus`.
  *
  * Speech recognition takes seconds where frame embedding takes minutes, so a
@@ -61,6 +69,8 @@ export type VideoRecord = {
    */
   framesTotal: number
   status: VideoStatus
+  /** How the video got here — the Record tab's saves are `recording`. */
+  source: VideoSource
   transcriptStatus: TranscriptStatus
   /** Detected spoken language (ISO-639-1 where known) — the track's srclang. */
   language?: string
@@ -85,6 +95,7 @@ type ApiVideo = {
   size_bytes: number
   duration_seconds: number | null
   status: VideoStatus
+  source?: string
   error: string | null
   frames_total: number
   frames_indexed: number
@@ -145,6 +156,9 @@ function toRecord(video: ApiVideo): VideoRecord {
     frames: video.frames_indexed,
     framesTotal: video.frames_total,
     status: video.status,
+    // An older backend predates the column — a video that predates it is a
+    // plain upload by definition.
+    source: (video.source as VideoSource | undefined) ?? 'upload',
     // An older backend omits these entirely — treat that as "no transcript
     // coming" rather than leaving the UI polling forever.
     transcriptStatus: video.transcript_status ?? 'skipped',
@@ -261,7 +275,8 @@ function putFile(
  */
 async function createMultipartApi(
   file: File,
-  onProgress?: (loaded: number, total: number) => void,
+  onProgress: ((loaded: number, total: number) => void) | undefined,
+  source: VideoSource,
 ): Promise<VideoRecord> {
   const data = await apiFetch<PresignMultipart>('/api/v1/videos/presign/multipart', {
     method: 'POST',
@@ -269,6 +284,7 @@ async function createMultipartApi(
       filename: file.name,
       size_bytes: file.size,
       content_type: file.type || 'application/octet-stream',
+      source,
     }),
   })
 
@@ -310,9 +326,11 @@ async function createMultipartApi(
 async function uploadViaApi(
   file: File,
   onProgress?: (loaded: number, total: number) => void,
+  source: VideoSource = 'upload',
 ): Promise<VideoRecord> {
   const form = new FormData()
   form.append('file', file)
+  form.append('source', source)
 
   const response = await fetch(url('/api/v1/videos'), {
     method: 'POST',
@@ -330,6 +348,15 @@ async function uploadViaApi(
   return toRecord(video)
 }
 
+export type CreateVideoOptions = {
+  /**
+   * How the upload should be labelled (`upload` | `recording` | `url`). The
+   * Record tab sends `recording` so its saves are tagged in the library.
+   */
+  source?: VideoSource
+  onProgress?: (loaded: number, total: number) => void
+}
+
 /**
  * Create a video on the server.
  *
@@ -342,17 +369,17 @@ async function uploadViaApi(
  */
 export async function createVideoApi(
   file: File,
-  onProgress?: (loaded: number, total: number) => void,
+  { source = 'upload', onProgress }: CreateVideoOptions = {},
 ): Promise<VideoRecord> {
   // Files above the 5 GiB single-PUT cap go through the chunked multipart
   // flow. A 409 there means storage can't presign at all (local dev) — the
   // file then buffers through the API instead.
   if (file.size > SINGLE_PUT_LIMIT) {
     try {
-      return await createMultipartApi(file, onProgress)
+      return await createMultipartApi(file, onProgress, source)
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        return uploadViaApi(file, onProgress)
+        return uploadViaApi(file, onProgress, source)
       }
       throw error
     }
@@ -369,6 +396,7 @@ export async function createVideoApi(
         filename: file.name,
         size_bytes: file.size,
         content_type: file.type || 'application/octet-stream',
+        source,
       }),
     })
     presigned = data.upload_url ? data : null
@@ -397,7 +425,7 @@ export async function createVideoApi(
   }
 
   // Fallback: multipart through the API (local dev storage / older backend).
-  return uploadViaApi(file, onProgress)
+  return uploadViaApi(file, onProgress, source)
 }
 
 async function readError(response: Response, fallback: string): Promise<string> {
