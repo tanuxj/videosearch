@@ -14,6 +14,7 @@ import {
 } from '../lib/store'
 import type { VideoRecord } from '../lib/store'
 import { addVideosToCollection, createCollection, useCollections } from '../lib/collections'
+import { isEditorRole, useWorkspaces } from '../lib/workspaces'
 import { API_ENABLED } from '../lib/http'
 import { Modal } from './Modal'
 import { cn } from '../lib/cn'
@@ -149,14 +150,23 @@ type Props = {
   onClose: () => void
   /** Called with the finished video when the user chooses to search it. */
   onReady?: (video: VideoRecord) => void
+  /**
+   * Workspace uploads default into, or null for the personal library.
+   * The caller must be an editor of it — the picker only offers editor
+   * workspaces anyway.
+   */
+  initialWorkspaceId?: string | null
 }
 
-export function UploadDialog({ open, onClose, onReady }: Props) {
+export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Props) {
   const { user } = useAuth()
   const inputRef = useRef<HTMLInputElement>(null)
   const folderRef = useRef<HTMLInputElement>(null)
   const aliveRef = useRef(true)
   const { collections, refresh: refreshCollections } = useCollections()
+  const { workspaces } = useWorkspaces()
+  // Workspaces the caller may upload into — viewers are left out entirely.
+  const uploadWorkspaces = workspaces.filter((workspace) => isEditorRole(workspace.role))
 
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
@@ -183,6 +193,13 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
    */
   const [collectionId, setCollectionId] = useState('')
   const [newCollection, setNewCollection] = useState('')
+  /**
+   * Workspace the uploads land in; null is the uploader's personal library.
+   * '' in the select maps to null — the API treats null as personal.
+   */
+  const [workspaceId, setWorkspaceId] = useState<string | null>(
+    initialWorkspaceId ?? null,
+  )
   /** Seconds remaining, once enough frames have landed to estimate a rate. */
   const [eta, setEta] = useState<number | null>(null)
 
@@ -215,9 +232,10 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
       setBatch(null)
       setCollectionId('')
       setNewCollection('')
+      setWorkspaceId(initialWorkspaceId ?? null)
     }, 200)
     return () => clearTimeout(timer)
-  }, [open])
+  }, [open, initialWorkspaceId])
 
   /**
    * Server mode: start an import (file upload or URL download), then poll
@@ -534,6 +552,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
               if (!aliveRef.current) return
               update(index, { transfer: total > 0 ? loaded / total : 1 })
             },
+            workspaceId,
           })
           update(index, { video: record, transfer: 1 })
           if (targetCollection) {
@@ -629,7 +648,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
         return
       }
       await ingestServer(
-        (onProgress) => createVideoApi(file, { onProgress }),
+        (onProgress) => createVideoApi(file, { onProgress, workspaceId }),
         false,
         collection,
       )
@@ -671,6 +690,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
             createVideoFromUrl(https[0]!, {
               prompt: autoPrompt || undefined,
               clipLimit: autoPrompt ? 3 : 0,
+              workspaceId,
             }),
           true,
           collection,
@@ -696,6 +716,7 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
     const created = await createVideosFromUrls(urls, {
       prompt: autoPrompt || undefined,
       clipLimit: autoPrompt ? 3 : 0,
+      workspaceId,
     })
     if (!aliveRef.current) return
     const items: BatchItem[] = created.map((item) => ({
@@ -912,6 +933,35 @@ export function UploadDialog({ open, onClose, onReady }: Props) {
                 recordings can’t be indexed, and channel/playlist links aren’t
                 supported yet — paste individual videos.
               </p>
+            </div>
+          )}
+
+          {/* Uploads land in a workspace when one is chosen — same reasoning
+              as the collection picker below: this is the one moment the user
+              has the whole batch in mind. Only editor workspaces are listed;
+              a viewer can't upload anywhere but their own library. */}
+          {API_ENABLED && uploadWorkspaces.length > 0 && (
+            <div className="flex flex-col gap-2 rounded-xl border border-line bg-surface-soft p-3.5">
+              <label
+                htmlFor="upload-workspace"
+                className="text-[12.5px] font-medium text-ink-dim"
+              >
+                Upload to{' '}
+                <span className="font-normal text-ink-faint">(optional)</span>
+              </label>
+              <select
+                id="upload-workspace"
+                value={workspaceId ?? ''}
+                onChange={(event) => setWorkspaceId(event.target.value || null)}
+                className="w-full rounded-lg border border-line-strong bg-panel px-3 py-2 text-[13.5px] text-ink outline-none focus:border-brand"
+              >
+                <option value="">My library</option>
+                {uploadWorkspaces.map((workspace) => (
+                  <option key={workspace.id} value={workspace.id}>
+                    {workspace.name}
+                  </option>
+                ))}
+              </select>
             </div>
           )}
 

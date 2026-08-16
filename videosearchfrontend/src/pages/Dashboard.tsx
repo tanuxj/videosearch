@@ -1,14 +1,21 @@
 import { useState } from 'react'
-import { useNavigate } from '../lib/router'
+import { useLocation, useNavigate } from '../lib/router'
 import { useAuth } from '../lib/auth'
 import { removeVideo, sourceFor, useVideos } from '../lib/store'
 import { useCollections } from '../lib/collections'
+import { isEditorRole, useWorkspaces } from '../lib/workspaces'
+import type { WorkspaceRole } from '../lib/workspaces'
 import { API_ENABLED } from '../lib/http'
 import { AppShell } from '../components/Shell'
 import { UploadDialog } from '../components/UploadDialog'
 import { ShareButton } from '../components/ShareButton'
 import { SavedClips } from '../components/SavedClips'
 import { CollectionBar, CollectionMenu } from '../components/Collections'
+import {
+  MoveMenu,
+  PERSONAL_LIBRARY,
+  WorkspaceSwitcher,
+} from '../components/WorkspaceControls'
 import { Button } from '../components/ui/Button'
 import {
   Chip,
@@ -20,6 +27,7 @@ import {
 import {
   ClockIcon,
   FilmIcon,
+  FolderIcon,
   LayersIcon,
   MicIcon,
   PlayIcon,
@@ -40,18 +48,35 @@ export default function Dashboard() {
   const navigate = useNavigate()
   const videos = useVideos(user?.id)
   const { collections } = useCollections()
+  const { workspaces } = useWorkspaces()
+  const location = useLocation()
   const [uploadOpen, setUploadOpen] = useState(false)
   /** Collection currently filtering the grid; null is "all videos". */
   const [activeCollection, setActiveCollection] = useState<string | null>(null)
+  /** Workspace currently scoping the grid; null is "all libraries". */
+  const [activeWorkspace, setActiveWorkspace] = useState<string | null>(
+    () => location.query.get('ws'),
+  )
 
-  // Filtered here rather than through the API's `collection_id` param: the
-  // library is already loaded and carries its membership, so switching
-  // collections is instant instead of a round trip. The server-side filter is
+  // Filtered here rather than through the API's params: the library is
+  // already loaded and carries its membership (each video knows its
+  // workspace), so switching scopes is instant. The server-side filters are
   // still there for libraries too large to hold client-side.
+  const workspaceFilter =
+    activeWorkspace === PERSONAL_LIBRARY ||
+    (activeWorkspace !== null &&
+      workspaces.some((workspace) => workspace.id === activeWorkspace))
+      ? activeWorkspace
+      : null
+  const scoped = videos.filter((video) => {
+    if (workspaceFilter === null) return true
+    if (workspaceFilter === PERSONAL_LIBRARY) return video.workspaceId == null
+    return video.workspaceId === workspaceFilter
+  })
   const shown =
     activeCollection === null
-      ? videos
-      : videos.filter((video) => video.collectionIds.includes(activeCollection))
+      ? scoped
+      : scoped.filter((video) => video.collectionIds.includes(activeCollection))
 
   // Stats describe the whole library, not the current filter — they are the
   // workspace summary at the top of the page, not a readout of the grid.
@@ -62,6 +87,22 @@ export default function Dashboard() {
 
   const activeName =
     collections.find((item) => item.id === activeCollection)?.name ?? null
+  const activeWorkspaceName =
+    workspaces.find((workspace) => workspace.id === workspaceFilter)?.name ?? null
+
+  /** The caller's role in a workspace, for permission-aware rendering. */
+  function roleIn(workspaceId: string | null | undefined): WorkspaceRole | null {
+    if (!workspaceId) return null
+    return workspaces.find((workspace) => workspace.id === workspaceId)?.role ?? null
+  }
+
+  // Viewing a workspace you can't contribute to hides the upload buttons —
+  // the dialog would default to your personal library, which reads wrong
+  // from inside someone else's team space.
+  const canUploadHere =
+    workspaceFilter === null ||
+    workspaceFilter === PERSONAL_LIBRARY ||
+    isEditorRole(roleIn(workspaceFilter))
 
   const firstName = user?.name.split(' ')[0] ?? 'there'
 
@@ -71,15 +112,17 @@ export default function Dashboard() {
       subtitle="Everything you've indexed, ready to search."
       actions={
         <>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => setUploadOpen(true)}
-            className="[&_svg]:size-4"
-          >
-            <UploadIcon />
-            Add video
-          </Button>
+          {canUploadHere && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setUploadOpen(true)}
+              className="[&_svg]:size-4"
+            >
+              <UploadIcon />
+              Add video
+            </Button>
+          )}
           <Button
             size="sm"
             onClick={() => navigate('/search')}
@@ -124,20 +167,34 @@ export default function Dashboard() {
             subtitle={
               activeName
                 ? `Showing the “${activeName}” collection.`
-                : 'Pick one to search, or add something new.'
+                : activeWorkspaceName
+                  ? `Showing the “${activeWorkspaceName}” workspace.`
+                  : 'Pick one to search, or add something new.'
             }
             actions={
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => setUploadOpen(true)}
-                className="[&_svg]:size-4"
-              >
-                <UploadIcon />
-                Add videos
-              </Button>
+              canUploadHere && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setUploadOpen(true)}
+                  className="[&_svg]:size-4"
+                >
+                  <UploadIcon />
+                  Add videos
+                </Button>
+              )
             }
           >
+            {API_ENABLED && workspaces.length > 0 && (
+              <div className="border-b border-line px-4 py-3 sm:px-5">
+                <WorkspaceSwitcher
+                  workspaces={workspaces}
+                  value={workspaceFilter}
+                  onChange={setActiveWorkspace}
+                />
+              </div>
+            )}
+
             {API_ENABLED && videos.length > 0 && (
               <div className="border-b border-line px-4 py-3 sm:px-5">
                 <CollectionBar
@@ -167,10 +224,20 @@ export default function Dashboard() {
             ) : shown.length === 0 ? (
               <EmptyState
                 icon={<LayersIcon />}
-                title="Nothing filed here yet"
-                body={`No videos are in “${activeName ?? ''}”. Use the File button on any video to add it, or pick a collection when you upload.`}
+                title="Nothing here yet"
+                body={
+                  activeWorkspaceName
+                    ? `No videos are in the “${activeWorkspaceName}” workspace yet. Add some from the upload dialog, or switch libraries.`
+                    : `No videos are in “${activeName ?? ''}”. Use the File button on any video to add it, or pick a collection when you upload.`
+                }
                 action={
-                  <Button variant="secondary" onClick={() => setActiveCollection(null)}>
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setActiveCollection(null)
+                      setActiveWorkspace(null)
+                    }}
+                  >
                     Show all videos
                   </Button>
                 }
@@ -238,6 +305,15 @@ export default function Dashboard() {
                         </Chip>
                       )}
 
+                      {/* Workspace videos carry their home's name so shared
+                          footage is distinguishable from personal at a glance. */}
+                      {API_ENABLED && video.workspaceId && (
+                        <Chip tone="neutral" icon={<FolderIcon />}>
+                          {workspaces.find((w) => w.id === video.workspaceId)?.name ??
+                            'Workspace'}
+                        </Chip>
+                      )}
+
                       {!API_ENABLED && !sourceFor(video.id) && (
                         <Chip title="The file handle was lost when the tab reloaded — re-attach it on the search page to play clips back.">
                           Playback offline
@@ -246,6 +322,10 @@ export default function Dashboard() {
 
                       {API_ENABLED && (
                         <CollectionMenu video={video} collections={collections} />
+                      )}
+
+                      {API_ENABLED && (
+                        <MoveMenu video={video} workspaces={workspaces} />
                       )}
 
                       {API_ENABLED && <ShareButton videoId={video.id} />}
@@ -261,21 +341,26 @@ export default function Dashboard() {
                           Search
                         </Button>
                       )}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-label={`Delete ${video.name}`}
-                        className="px-2 hover:bg-danger-wash hover:text-danger [&_svg]:size-4"
-                        onClick={() => {
-                          if (!user) return
-                          if (
-                            confirm(`Delete “${video.name}” and its frame index?`)
-                          )
-                            void removeVideo(user.id, video.id)
-                        }}
-                      >
-                        <TrashIcon />
-                      </Button>
+                      {/* A viewer of a workspace video can watch but not
+                          delete — the button only renders for editors. */}
+                      {!video.workspaceId ||
+                        isEditorRole(roleIn(video.workspaceId)) ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          aria-label={`Delete ${video.name}`}
+                          className="px-2 hover:bg-danger-wash hover:text-danger [&_svg]:size-4"
+                          onClick={() => {
+                            if (!user) return
+                            if (
+                              confirm(`Delete “${video.name}” and its frame index?`)
+                            )
+                              void removeVideo(user.id, video.id)
+                          }}
+                        >
+                          <TrashIcon />
+                        </Button>
+                      ) : null}
                     </div>
                     </div>
                     {/* Auto-extracted scenes — only renders when this video
@@ -292,6 +377,11 @@ export default function Dashboard() {
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
         onReady={(video) => navigate(`/search?v=${video.id}`)}
+        initialWorkspaceId={
+          canUploadHere && workspaceFilter !== PERSONAL_LIBRARY
+            ? workspaceFilter
+            : null
+        }
       />
     </AppShell>
   )

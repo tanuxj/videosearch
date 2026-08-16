@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from app.collections.models import CollectionVideo
 from app.core.config import get_settings
 from app.videos.models import VIDEO_SOURCES, TranscriptSegment, Video
 from app.videos.storage import storage
+from app.workspaces import service as workspaces_service
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,22 @@ def _valid_source(source: str) -> str:
     return source if source in VIDEO_SOURCES else "upload"
 
 
+async def _require_workspace_editor(
+    db: AsyncSession, user_id: uuid.UUID, workspace_id: uuid.UUID | None
+) -> None:
+    """Raise `VideoForbidden` unless the caller may upload into the workspace.
+
+    A non-member (or a viewer) uploading into a shared workspace would write
+    footage the workspace never agreed to host — or, worse, leak into it.
+    The uploader's own library (null) needs no check.
+    """
+    if workspace_id is None:
+        return
+    role = await workspaces_service.member_role(db, workspace_id, user_id)
+    if not workspaces_service.can_edit_videos(role):
+        raise VideoForbidden(workspace_id)
+
+
 async def create_video(
     db: AsyncSession,
     *,
@@ -120,6 +137,7 @@ async def create_video(
     size_bytes: int,
     content_type: str | None,
     source: str = "upload",
+    workspace_id: uuid.UUID | None = None,
     file,
 ) -> tuple[Video, Path | None]:
     """Persist an uploaded file and register its video row.
@@ -128,6 +146,9 @@ async def create_video(
     kept for the indexing pipeline so it does not download the object that was
     just uploaded; it is None when the backend is already local. **The caller
     owns that file** and must delete it (the pipeline does).
+
+    Uploading into a workspace requires an editor role there (owner/admin/
+    member) — checked before a single byte is stored.
 
     Order matters: the file is written to storage *first*, then the row is
     inserted. If the insert fails the object is deleted again, so a failed
@@ -138,6 +159,7 @@ async def create_video(
     limits would need manual body handling — fine for an MVP.
     """
     ext = validate_upload(filename, size_bytes)
+    await _require_workspace_editor(db, owner_id, workspace_id)
     key = object_key(owner_id, uuid.uuid4(), ext)
 
     # Stage to local disk before uploading, not after: boto3 closes the file
@@ -158,6 +180,7 @@ async def create_video(
 
         video = Video(
             owner_id=owner_id,
+            workspace_id=workspace_id,
             name=_safe_name(filename),
             size_bytes=size_bytes,
             status="processing",
@@ -202,7 +225,9 @@ async def create_url_video(
     owner_id: uuid.UUID,
     title: str,
     ext: str,
+    workspace_id: uuid.UUID | None = None,
 ) -> Video:
+    await _require_workspace_editor(db, owner_id, workspace_id)
     """Reserve a `processing` video row for a URL import.
 
     The storage key uses the extension the metadata probe reported; the
@@ -214,6 +239,7 @@ async def create_url_video(
     video_id = uuid.uuid4()
     video = Video(
         owner_id=owner_id,
+        workspace_id=workspace_id,
         name=display_name(title, ext),
         size_bytes=0,
         status="processing",
@@ -234,7 +260,9 @@ async def create_pending_video(
     filename: str,
     size_bytes: int,
     source: str = "upload",
+    workspace_id: uuid.UUID | None = None,
 ) -> Video:
+    await _require_workspace_editor(db, owner_id, workspace_id)
     """Reserve a `processing` video row before its bytes arrive.
 
     Presigned-upload flow: the API mints a PUT URL pointing straight at the
@@ -248,6 +276,7 @@ async def create_pending_video(
     key = object_key(owner_id, video_id, _extension(filename))
     video = Video(
         owner_id=owner_id,
+        workspace_id=workspace_id,
         name=_safe_name(filename),
         size_bytes=size_bytes,
         status="processing",
@@ -298,14 +327,29 @@ async def list_videos(
     owner_id: uuid.UUID,
     *,
     collection_id: uuid.UUID | None = None,
+    workspace_id: uuid.UUID | None = None,
 ) -> list[Video]:
-    """The user's videos, newest first, optionally narrowed to one collection.
+    """The user's videos, newest first, optionally narrowed.
 
-    An unknown or someone else's `collection_id` yields an empty list rather
-    than an error: the join finds no membership rows, and the `owner_id` filter
-    means a leaked id can never widen the result past the caller's own library.
+    Without `workspace_id`: the user's personal library plus every video in
+    the workspaces they belong to. With it: only that workspace's videos
+    (empty when the caller isn't a member — a leaked id can never widen the
+    result). `collection_id` narrows further, and its membership join can
+    never leak another user's library because the scope filter is applied
+    first.
     """
-    query = select(Video).where(Video.owner_id == owner_id)
+    if workspace_id is not None:
+        if not await workspaces_service.is_member(db, workspace_id, owner_id):
+            return []
+        query = select(Video).where(Video.workspace_id == workspace_id)
+    else:
+        workspace_ids = await workspaces_service.accessible_workspace_ids(db, owner_id)
+        query = select(Video).where(
+            or_(
+                Video.owner_id == owner_id,
+                Video.workspace_id.in_(workspace_ids) if workspace_ids else False,
+            )
+        )
     if collection_id is not None:
         query = query.join(CollectionVideo, CollectionVideo.video_id == Video.id).where(
             CollectionVideo.collection_id == collection_id
@@ -315,11 +359,22 @@ async def list_videos(
 
 
 async def get_video(db: AsyncSession, owner_id: uuid.UUID, video_id: uuid.UUID) -> Video:
-    """Fetch a video, enforcing ownership (404 either way)."""
+    """Fetch a video the user may see — owner or workspace member (404 either way).
+
+    The membership lookup is a single indexed query, cheap enough for every
+    route that resolves a video by id (stream, transcript, search, share,
+    delete).
+    """
     video = await db.get(Video, video_id)
-    if video is None or video.owner_id != owner_id:
+    if video is None:
         raise VideoNotFound(video_id)
-    return video
+    if video.owner_id == owner_id:
+        return video
+    if video.workspace_id is not None and await workspaces_service.is_member(
+        db, video.workspace_id, owner_id
+    ):
+        return video
+    raise VideoNotFound(video_id)
 
 
 async def get_or_create_share_token(
@@ -403,9 +458,62 @@ async def list_transcript_segments(
     return list(result.scalars())
 
 
+async def _can_edit(db: AsyncSession, user_id: uuid.UUID, video: Video) -> bool:
+    """Whether `user_id` may mutate this video.
+
+    The uploader always can. For a workspace video, members with an editor
+    role (owner/admin/member) can; viewers are read-only.
+    """
+    if video.owner_id == user_id:
+        return True
+    if video.workspace_id is None:
+        return False
+    role = await workspaces_service.member_role(db, video.workspace_id, user_id)
+    return workspaces_service.can_edit_videos(role)
+
+
+class VideoForbidden(VideoError):
+    """The video exists but the caller's role can't mutate it (403)."""
+
+
+async def move_video(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    video_id: uuid.UUID,
+    *,
+    workspace_id: uuid.UUID | None,
+) -> Video:
+    """Move a video between workspaces (or back to the uploader's library).
+
+    The caller must be able to edit the video in its current home, and must
+    be an editor of the destination workspace when it's non-null. Moving to
+    a workspace the caller can't edit, or isn't a member of, raises
+    `VideoNotFound` — a leaked id never confirms a workspace's existence.
+    """
+    video = await get_video(db, user_id, video_id)
+    if not await _can_edit(db, user_id, video):
+        raise VideoForbidden(video_id)
+    if workspace_id is not None:
+        role = await workspaces_service.member_role(db, workspace_id, user_id)
+        if not workspaces_service.can_edit_videos(role):
+            raise VideoNotFound(video_id)
+    video.workspace_id = workspace_id
+    await db.commit()
+    await db.refresh(video)
+    logger.info("Video %s moved to workspace %s", video_id, workspace_id)
+    return video
+
+
 async def delete_video(db: AsyncSession, owner_id: uuid.UUID, video_id: uuid.UUID) -> None:
-    """Remove the row (cascades to frames and transcript segments) and its object."""
+    """Remove the row (cascades to frames and transcript segments) and its object.
+
+    The uploader, or an editor-role workspace member, may delete. A viewer
+    gets `VideoForbidden` (403) rather than a 404 — they can see the video,
+    they just can't delete it.
+    """
     video = await get_video(db, owner_id, video_id)
+    if not await _can_edit(db, owner_id, video):
+        raise VideoForbidden(video_id)
     await db.delete(video)
     await db.commit()
     await run_in_threadpool(storage.delete, video.storage_key)

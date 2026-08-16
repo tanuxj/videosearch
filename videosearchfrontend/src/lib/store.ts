@@ -72,6 +72,12 @@ export type VideoRecord = {
   /** How the video got here — the Record tab's saves are `recording`. */
   source: VideoSource
   /**
+   * The workspace this video lives in, or null for the uploader's personal
+   * library. Null means personal — older backends don't report the column
+   * at all, which reads the same.
+   */
+  workspaceId?: string | null
+  /**
    * Whether the file has a video track. False for audio-only recordings —
    * they have no frames, so there is nothing to scene-search and they stay
    * in the library. Undefined until the server has probed the file (or for
@@ -103,6 +109,7 @@ type ApiVideo = {
   duration_seconds: number | null
   status: VideoStatus
   source?: string
+  workspace_id?: string | null
   has_video?: boolean | null
   error: string | null
   frames_total: number
@@ -167,6 +174,8 @@ function toRecord(video: ApiVideo): VideoRecord {
     // An older backend predates the column — a video that predates it is a
     // plain upload by definition.
     source: (video.source as VideoSource | undefined) ?? 'upload',
+    // An older backend predates the column — a video without it is personal.
+    workspaceId: video.workspace_id ?? null,
     // Null until the pipeline probes the file — treat as "has video" so
     // pre-existing uploads stay searchable.
     hasVideo: video.has_video ?? undefined,
@@ -288,6 +297,7 @@ async function createMultipartApi(
   file: File,
   onProgress: ((loaded: number, total: number) => void) | undefined,
   source: VideoSource,
+  workspaceId?: string | null,
 ): Promise<VideoRecord> {
   const data = await apiFetch<PresignMultipart>('/api/v1/videos/presign/multipart', {
     method: 'POST',
@@ -296,6 +306,7 @@ async function createMultipartApi(
       size_bytes: file.size,
       content_type: file.type || 'application/octet-stream',
       source,
+      workspace_id: workspaceId ?? null,
     }),
   })
 
@@ -338,10 +349,13 @@ async function uploadViaApi(
   file: File,
   onProgress?: (loaded: number, total: number) => void,
   source: VideoSource = 'upload',
+  workspaceId?: string | null,
 ): Promise<VideoRecord> {
   const form = new FormData()
   form.append('file', file)
   form.append('source', source)
+  // Only set when non-empty — the endpoint rejects an empty-string UUID.
+  if (workspaceId) form.append('workspace_id', workspaceId)
 
   const response = await fetch(url('/api/v1/videos'), {
     method: 'POST',
@@ -365,6 +379,12 @@ export type CreateVideoOptions = {
    * Record tab sends `recording` so its saves are tagged in the library.
    */
   source?: VideoSource
+  /**
+   * Upload into this workspace instead of the personal library. Only
+   * editor-role members (owner/admin/member) may — the server enforces it
+   * and rejects viewers with 403.
+   */
+  workspaceId?: string | null
   onProgress?: (loaded: number, total: number) => void
 }
 
@@ -380,17 +400,17 @@ export type CreateVideoOptions = {
  */
 export async function createVideoApi(
   file: File,
-  { source = 'upload', onProgress }: CreateVideoOptions = {},
+  { source = 'upload', workspaceId, onProgress }: CreateVideoOptions = {},
 ): Promise<VideoRecord> {
   // Files above the 5 GiB single-PUT cap go through the chunked multipart
   // flow. A 409 there means storage can't presign at all (local dev) — the
   // file then buffers through the API instead.
   if (file.size > SINGLE_PUT_LIMIT) {
     try {
-      return await createMultipartApi(file, onProgress, source)
+      return await createMultipartApi(file, onProgress, source, workspaceId)
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        return uploadViaApi(file, onProgress, source)
+        return uploadViaApi(file, onProgress, source, workspaceId)
       }
       throw error
     }
@@ -408,6 +428,7 @@ export async function createVideoApi(
         size_bytes: file.size,
         content_type: file.type || 'application/octet-stream',
         source,
+        workspace_id: workspaceId ?? null,
       }),
     })
     presigned = data.upload_url ? data : null
@@ -436,7 +457,7 @@ export async function createVideoApi(
   }
 
   // Fallback: multipart through the API (local dev storage / older backend).
-  return uploadViaApi(file, onProgress, source)
+  return uploadViaApi(file, onProgress, source, workspaceId)
 }
 
 async function readError(response: Response, fallback: string): Promise<string> {
@@ -462,7 +483,7 @@ async function readError(response: Response, fallback: string): Promise<string> 
  */
 export async function createVideoFromUrl(
   sourceUrl: string,
-  opts: { prompt?: string; clipLimit?: number } = {},
+  opts: { prompt?: string; clipLimit?: number; workspaceId?: string | null } = {},
 ): Promise<VideoRecord> {
   const data = await apiFetch<ApiVideo>('/api/v1/videos/from-url', {
     method: 'POST',
@@ -470,6 +491,7 @@ export async function createVideoFromUrl(
       url: sourceUrl,
       prompt: opts.prompt ?? null,
       clip_limit: opts.clipLimit ?? 3,
+      workspace_id: opts.workspaceId ?? null,
     }),
   })
   return toRecord(data)
@@ -499,7 +521,7 @@ type ApiUrlImportItem = {
  */
 export async function createVideosFromUrls(
   urls: string[],
-  opts: { prompt?: string; clipLimit?: number } = {},
+  opts: { prompt?: string; clipLimit?: number; workspaceId?: string | null } = {},
 ): Promise<UrlImportResult[]> {
   const data = await apiFetch<{ items: ApiUrlImportItem[] }>('/api/v1/videos/from-urls', {
     method: 'POST',
@@ -507,6 +529,7 @@ export async function createVideosFromUrls(
       urls,
       prompt: opts.prompt ?? null,
       clip_limit: opts.clipLimit ?? 3,
+      workspace_id: opts.workspaceId ?? null,
     }),
   })
   return data.items.map((item) => ({
@@ -563,6 +586,26 @@ export async function removeVideo(userId: string, videoId: string): Promise<void
   }
   revokeSource(videoId)
   emit()
+}
+
+/**
+ * Move a video between workspaces, or back to the uploader's personal
+ * library (`workspaceId: null`).
+ *
+ * The caller must be able to edit the video and, for a workspace target, be
+ * an editor (owner/admin/member) of it — the server enforces both. The
+ * library re-lists so the moved video lands in its new home.
+ */
+export async function moveVideo(
+  videoId: string,
+  workspaceId: string | null,
+): Promise<VideoRecord> {
+  const data = await apiFetch<ApiVideo>(`/api/v1/videos/${videoId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ workspace_id: workspaceId }),
+  })
+  emit()
+  return toRecord(data)
 }
 
 export async function saveVideo(userId: string, video: VideoRecord): Promise<void> {

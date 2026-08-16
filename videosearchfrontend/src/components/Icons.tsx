@@ -324,3 +324,23 @@ export const StopIcon = ({ className }: Props) => (
     <rect x="6.5" y="6.5" width="11" height="11" rx="2.2" />
   </Solid>
 )
+
+/* ── Teams ──────────────────────────────────────────────── */
+
+// Folder — the per-video "move to workspace" control.
+export const FolderIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <path d="M3.5 7.5A2 2 0 015.5 5.5h4l2 2.5h7a2 2 0 012 2v7a2 2 0 01-2 2h-13a2 2 0 01-2-2v-9.5z" />
+  </Stroke>
+)
+
+// Two people — the Teams page's nav glyph. Drawn as overlapping busts so it
+// reads as a group rather than a single person.
+export const TeamsIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <circle cx="9" cy="8.5" r="3.6" />
+    <path d="M3.8 19.5a5.4 5.4 0 0110.4 0" />
+    <circle cx="16.4" cy="10.2" r="2.7" />
+    <path d="M15.8 14.4a4.6 4.6 0 014.9 5.1" />
+  </Stroke>
+)

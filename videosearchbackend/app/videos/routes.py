@@ -54,6 +54,7 @@ from app.videos.schemas import (
     UrlImportIn,
     UrlImportItem,
     VideoListOut,
+    VideoMoveIn,
     VideoOut,
 )
 from app.videos.storage import storage
@@ -81,6 +82,13 @@ def _human_bytes(n: int) -> str:
 
 def _too_large_detail() -> str:
     return f"File exceeds the {_human_bytes(videos_service.MAX_UPLOAD_BYTES)} upload limit"
+
+
+def _workspace_forbidden() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You can't upload into that workspace — ask its owner or admin for editor access.",
+    )
 
 
 def _plan_parts(size_bytes: int) -> tuple[int, int]:
@@ -139,6 +147,10 @@ async def upload_video(
         str,
         Form(description="How this video entered the library (upload | recording | url)."),
     ] = "upload",
+    workspace_id: Annotated[
+        uuid.UUID | None,
+        Form(description="Upload into this workspace instead of the personal library."),
+    ] = None,
 ) -> VideoOut:
     filename = file.filename or "video.mp4"
     try:
@@ -149,6 +161,7 @@ async def upload_video(
             size_bytes=file.size or 0,
             content_type=file.content_type,
             source=source,
+            workspace_id=workspace_id,
             file=file.file,
         )
     except videos_service.UnsupportedFileType as exc:
@@ -162,6 +175,8 @@ async def upload_video(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=_too_large_detail(),
         ) from exc
+    except videos_service.VideoForbidden as exc:
+        raise _workspace_forbidden() from exc
 
     # Fire-and-forget: the response goes out immediately with status
     # `processing`, and indexing runs to completion in the background. The
@@ -171,6 +186,43 @@ async def upload_video(
     elif staged_path is not None:
         # Nothing will consume it, so don't leave it in the temp dir.
         staged_path.unlink(missing_ok=True)
+    return VideoOut.model_validate(video)
+
+
+@router.patch(
+    "/{video_id}",
+    response_model=VideoOut,
+    summary="Move a video between workspaces",
+    description=(
+        "Moves the video into the given workspace (`workspace_id`), or back "
+        "to the uploader's personal library (null). The caller must be able "
+        "to edit the video and, for a workspace target, be an editor of it."
+    ),
+    responses={
+        403: {"description": "You can see the video but can't move it (viewer)"},
+        404: {"description": "Video not found, or not an editor of the target workspace"},
+    },
+)
+async def move_video(
+    user: CurrentUser,
+    db: DbSession,
+    video_id: uuid.UUID,
+    payload: VideoMoveIn,
+) -> VideoOut:
+    try:
+        video = await videos_service.move_video(
+            db,
+            user.id,
+            video_id,
+            workspace_id=payload.workspace_id,
+        )
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+    except videos_service.VideoForbidden as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can view this video but not move it.",
+        ) from exc
     return VideoOut.model_validate(video)
 
 
@@ -224,12 +276,16 @@ async def import_from_url(
     except url_import.UrlImportError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    video = await videos_service.create_url_video(
+    try:
+        video = await videos_service.create_url_video(
         db,
         owner_id=user.id,
         title=info["title"],
         ext=info["ext"],
+        workspace_id=payload.workspace_id,
     )
+    except videos_service.VideoForbidden as exc:
+        raise _workspace_forbidden() from exc
     # Fire-and-forget: the response returns immediately with status
     # `processing`; download + indexing run to completion in the background.
     # A `prompt` makes the job auto-save the best matching scenes as clips.
@@ -378,7 +434,19 @@ async def import_from_urls(
                 owner_id=user.id,
                 title=outcome["title"],
                 ext=outcome["ext"],
+                workspace_id=payload.workspace_id,
             )
+        except videos_service.VideoForbidden:
+            items.append(
+                UrlImportItem(
+                    url=url,
+                    error=(  # noqa: E501 - user-facing copy
+                        "You can't upload into that workspace — ask its owner "
+                        "or admin for editor access."
+                    ),
+                )
+            )
+            continue
         except Exception as exc:  # pragma: no cover - local reservation, nothing network-bound
             items.append(UrlImportItem(url=url, error=f"Could not start the import: {exc}"))
             continue
@@ -434,6 +502,8 @@ async def presign_upload(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=_too_large_detail(),
         ) from exc
+    except videos_service.VideoForbidden as exc:
+        raise _workspace_forbidden() from exc
 
     if not storage.presign_enabled:
         raise HTTPException(
@@ -447,6 +517,7 @@ async def presign_upload(
         filename=payload.filename,
         size_bytes=payload.size_bytes,
         source=payload.source,
+        workspace_id=payload.workspace_id,
     )
 
     upload_url = await run_in_threadpool(
@@ -499,6 +570,8 @@ async def presign_multipart_upload(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=_too_large_detail(),
         ) from exc
+    except videos_service.VideoForbidden as exc:
+        raise _workspace_forbidden() from exc
 
     if not storage.presign_enabled:
         raise HTTPException(
@@ -512,6 +585,7 @@ async def presign_multipart_upload(
         filename=payload.filename,
         size_bytes=payload.size_bytes,
         source=payload.source,
+        workspace_id=payload.workspace_id,
     )
 
     # Open the multipart upload and mint one URL per chunk. Any failure here
@@ -697,8 +771,14 @@ async def list_videos(
         uuid.UUID | None,
         Query(description="Only videos filed in this collection."),
     ] = None,
+    workspace_id: Annotated[
+        uuid.UUID | None,
+        Query(description="Only videos in this workspace."),
+    ] = None,
 ) -> VideoListOut:
-    videos = await videos_service.list_videos(db, user.id, collection_id=collection_id)
+    videos = await videos_service.list_videos(
+        db, user.id, collection_id=collection_id, workspace_id=workspace_id
+    )
     # One query for the whole page rather than one per card.
     memberships = await collections_service.collection_ids_for(db, [video.id for video in videos])
     items = [
@@ -1093,4 +1173,9 @@ async def delete_video(user: CurrentUser, db: DbSession, video_id: uuid.UUID) ->
         await videos_service.delete_video(db, user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
+    except videos_service.VideoForbidden as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can view this video but not delete it.",
+        ) from exc
     return MessageResponse(detail="Video deleted")

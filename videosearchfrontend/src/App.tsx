@@ -13,6 +13,7 @@ import Search from './pages/Search'
 import Record from './pages/Record'
 import Recordings from './pages/Recordings'
 import Share from './pages/Share'
+import Workspaces from './pages/Workspaces'
 
 const PROTECTED = new Set([
   '/dashboard',
@@ -21,6 +22,7 @@ const PROTECTED = new Set([
   '/history',
   '/record',
   '/recordings',
+  '/workspaces',
 ])
 const AUTH_ONLY = new Set(['/login', '/signup'])
 
@@ -89,6 +91,8 @@ function Routes() {
       return <Record />
     case '/recordings':
       return <Recordings />
+    case '/workspaces':
+      return <Workspaces />
     case '/upload':
       return null // redirected above
     default:

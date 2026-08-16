@@ -75,6 +75,17 @@ class Video(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
+    # The workspace this video lives in, or null for the uploader's personal
+    # library. Every member of the workspace can access the video; the
+    # uploader (owner_id) always can, whether or not they remain a member.
+    # Deleting the workspace reverts this to null (ON DELETE SET NULL), so
+    # the footage goes back to the uploader instead of vanishing.
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     # Original filename — for display only; `storage_key` is what matters.
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)

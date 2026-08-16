@@ -10,5 +10,6 @@ from app.collections import models as collections_models  # noqa: F401  (registe
 from app.db.base import Base
 from app.history import models as history_models  # noqa: F401  (registers tables)
 from app.videos import models as videos_models  # noqa: F401  (registers tables)
+from app.workspaces import models as workspaces_models  # noqa: F401  (registers tables)
 
 __all__ = ["Base"]

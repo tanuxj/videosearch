@@ -16,6 +16,10 @@ class VideoOut(BaseModel):
     size_bytes: int
     duration_seconds: float | None = None
     status: str
+    # The workspace this video lives in, or null for the uploader's personal
+    # library. The frontend uses it to tag shared videos and scope the
+    # library view.
+    workspace_id: uuid.UUID | None = None
     # How the video entered the library — `upload` | `recording` | `url`.
     # The frontend tags recordings with it so they read differently from
     # plain uploads in the library.
@@ -91,6 +95,17 @@ class StreamUrlOut(BaseModel):
     worker: bool
 
 
+class VideoMoveIn(BaseModel):
+    """Move a video between workspaces (or back to the uploader's library).
+
+    `workspace_id: null` moves the video back to the uploader's personal
+    library. The caller must be able to edit the video and, when the target
+    is a workspace, be an editor of it.
+    """
+
+    workspace_id: uuid.UUID | None = None
+
+
 class UrlImportIn(BaseModel):
     """A link to a video to download and index.
 
@@ -115,6 +130,8 @@ class UrlImportIn(BaseModel):
     )
     # How many top scenes to keep when `prompt` is set (0 disables auto-save).
     clip_limit: int = Field(default=3, ge=0, le=9)
+    # Upload into a workspace instead of the uploader's personal library.
+    workspace_id: uuid.UUID | None = None
 
 
 class UrlImportBatchIn(BaseModel):
@@ -139,6 +156,8 @@ class UrlImportBatchIn(BaseModel):
         examples=["a red car driving on a highway"],
     )
     clip_limit: int = Field(default=3, ge=0, le=9)
+    # Upload into a workspace instead of the uploader's personal library.
+    workspace_id: uuid.UUID | None = None
 
 
 class UrlImportItem(BaseModel):
@@ -225,6 +244,9 @@ class PresignUploadIn(BaseModel):
     # its saves are tagged in the library. Whitelisted to the same values the
     # column check constraint accepts.
     source: str = Field(default="upload", pattern="^(upload|recording|url)$")
+    # Upload into a workspace instead of the uploader's personal library.
+    # The caller must be an editor (owner/admin/member) of that workspace.
+    workspace_id: uuid.UUID | None = None
 
 
 class PresignUploadOut(BaseModel):

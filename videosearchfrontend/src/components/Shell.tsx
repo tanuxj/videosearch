@@ -10,6 +10,7 @@ import {
   RecordIcon,
   SearchIcon,
   SignOutIcon,
+  TeamsIcon,
   UploadIcon,
 } from './Icons'
 import { LogoMark, Wordmark } from './Logo'
@@ -122,6 +123,7 @@ const NAV_MAIN = [
   { to: '/history', label: 'History', icon: HistoryIcon },
   { to: '/record', label: 'Record', icon: RecordIcon },
   { to: '/recordings', label: 'Recordings', icon: MicIcon },
+  { to: '/workspaces', label: 'Teams', icon: TeamsIcon },
   { to: '/dashboard', label: 'Library', icon: GridIcon },
 ]
 

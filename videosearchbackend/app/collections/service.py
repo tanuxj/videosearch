@@ -17,13 +17,14 @@ safer and cheaper here: the two access patterns the UI actually has
 import logging
 import uuid
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collections.models import Collection, CollectionVideo
 from app.videos.models import Video
+from app.workspaces import service as workspaces_service
 
 logger = logging.getLogger(__name__)
 
@@ -113,16 +114,25 @@ async def delete_collection(
 async def _owned_video_ids(
     db: AsyncSession, owner_id: uuid.UUID, video_ids: list[uuid.UUID]
 ) -> list[uuid.UUID]:
-    """Narrow `video_ids` to the ones this user actually owns.
+    """Narrow `video_ids` to the ones this user may file.
 
-    Silently dropping the rest is deliberate: a bulk "add these 40 videos"
-    where one id is stale should file the other 39, not 400 the whole request.
-    The response reports how many landed.
+    "May file" is the same rule as "may see": their own videos plus videos
+    in workspaces they belong to — a workspace member should be able to file
+    a shared video into their own collections. Silently dropping the rest is
+    deliberate: a bulk "add these 40 videos" where one id is stale (or not
+    shared with them) should file the other 39, not 400 the whole request.
     """
     if not video_ids:
         return []
+    workspace_ids = await workspaces_service.accessible_workspace_ids(db, owner_id)
     result = await db.execute(
-        select(Video.id).where(Video.owner_id == owner_id, Video.id.in_(video_ids))
+        select(Video.id).where(
+            Video.id.in_(video_ids),
+            or_(
+                Video.owner_id == owner_id,
+                Video.workspace_id.in_(workspace_ids) if workspace_ids else False,
+            ),
+        )
     )
     return list(result.scalars())
 
