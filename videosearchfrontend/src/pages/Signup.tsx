@@ -93,16 +93,19 @@ export default function Signup() {
 
         <p className="text-center text-[12px] leading-relaxed text-ink-faint">
           By continuing you agree to our{' '}
-          <a href="#terms" className="text-ink-dim underline underline-offset-2">
+          <Link
+            to="/terms"
+            className="text-ink-dim underline underline-offset-2"
+          >
             Terms of Service
-          </a>{' '}
+          </Link>{' '}
           and{' '}
-          <a
-            href="#privacy"
+          <Link
+            to="/privacy"
             className="text-ink-dim underline underline-offset-2"
           >
             Privacy Policy
-          </a>
+          </Link>
           .
         </p>
       </form>

@@ -100,15 +100,18 @@ export function MarketingShell({ children }: { children: ReactNode }) {
             © {new Date().getFullYear()} {APP_NAME}
           </span>
           <nav className="flex items-center gap-5">
-            {['Privacy', 'Terms', 'Docs'].map((label) => (
-              <a
-                key={label}
-                href={`#${label.toLowerCase()}`}
-                className="text-[12.5px] text-ink-faint transition-colors hover:text-ink"
-              >
-                {label}
-              </a>
-            ))}
+            <Link
+              to="/privacy"
+              className="text-[12.5px] text-ink-faint transition-colors hover:text-ink"
+            >
+              Privacy
+            </Link>
+            <Link
+              to="/terms"
+              className="text-[12.5px] text-ink-faint transition-colors hover:text-ink"
+            >
+              Terms
+            </Link>
           </nav>
         </div>
       </footer>
