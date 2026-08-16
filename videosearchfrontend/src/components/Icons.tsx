@@ -325,6 +325,16 @@ export const StopIcon = ({ className }: Props) => (
   </Solid>
 )
 
+/* ── Notifications ─────────────────────────────────────── */
+
+// Bell — the header's in-app notification alert.
+export const BellIcon = ({ className }: Props) => (
+  <Stroke className={className}>
+    <path d="M6 9.5a6 6 0 0112 0c0 4.5 1.5 5.5 1.5 5.5h-15S6 14 6 9.5z" />
+    <path d="M10 18.5a2 2 0 004 0" />
+  </Stroke>
+)
+
 /* ── Teams ──────────────────────────────────────────────── */
 
 // Folder — the per-video "move to workspace" control.

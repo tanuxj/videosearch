@@ -14,6 +14,7 @@ import {
   UploadIcon,
 } from './Icons'
 import { LogoMark, Wordmark } from './Logo'
+import { NotificationBell } from './NotificationBell'
 
 export const APP_NAME: string =
   import.meta.env.VITE_APP_NAME || 'SearchInVideo'
@@ -241,7 +242,10 @@ export function AppShell({ title, subtitle, actions, children }: AppShellProps) 
               <p className="mt-0.5 text-[12.5px] text-ink-dim">{subtitle}</p>
             )}
           </div>
-          {actions && <div className="flex items-center gap-2">{actions}</div>}
+          <div className="flex items-center gap-2">
+            <NotificationBell />
+            {actions && <div className="flex items-center gap-2">{actions}</div>}
+          </div>
         </header>
 
         {/* Mobile nav — the sidebar is hidden under md. */}

@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.session import SessionFactory
+from app.notifications import service as notifications_service
 from app.videos import embedder, transcribe
 from app.videos.clips import ffmpeg_binary
 from app.videos.models import Frame, TranscriptSegment, Video
@@ -449,6 +450,11 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
                 video.frames_indexed = 0
                 video.status = "ready"
                 await db.commit()
+                # The uploader's bell rings: indexing is done (nothing to
+                # frame-index, but the video is searchable by transcript).
+                await notifications_service.create_notification(
+                    db, user_id=video.owner_id, video_id=video.id
+                )
                 transcript_task = asyncio.create_task(
                     _run_transcription(video_id, local_path, exc.duration)
                 )
@@ -524,6 +530,12 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
             video.frames_total = video.frames_indexed
             video.status = "ready"
             await db.commit()
+            # The uploader's bell rings: the video is now searchable. Written
+            # after the ready commit on purpose — a failed notification must
+            # never roll back a finished index.
+            await notifications_service.create_notification(
+                db, user_id=video.owner_id, video_id=video.id
+            )
             logger.info(
                 "Indexed video %s: %d frames over %.1fs of video in %.1fs "
                 "(decode %.1fs, embed %.1fs, db %.1fs)",

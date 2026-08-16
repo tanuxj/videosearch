@@ -209,6 +209,24 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
   const downloading = mode === 'url' && stage === 0 && !done
   const stages = mode === 'url' ? URL_STAGES : FILE_STAGES
 
+  /**
+   * Indexing runs entirely on the server (FastAPI BackgroundTasks), so the
+   * browser tab is free once the transfer is in — URL imports never send
+   * client bytes at all, and a file upload only needs the tab while the bytes
+   * stream up. Tell the user which it is so they know they can leave; demo
+   * mode has no server to keep working, so the reassurance is server-only.
+   */
+  const uploading =
+    batch !== null
+      ? batch.some((item) => item.transfer !== undefined && !item.done)
+      : mode === 'file' && stage === 0 && !done
+  const backgroundNote =
+    mode === 'url'
+      ? 'The import runs in the background — you can close this tab. Once it’s indexed, search for it from your library.'
+      : uploading
+        ? 'Keep this tab open while the file uploads — indexing starts the moment it lands.'
+        : 'Indexing runs in the background — you can close this tab. The video becomes searchable once it’s ready.'
+
   useEffect(() => {
     aliveRef.current = true
     return () => {
@@ -1007,6 +1025,7 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
         ) : (
           <>
             {batch ? (
+              <>
               <ul className="flex flex-col gap-2">
                 {batch.map((item) => (
                   <li
@@ -1082,6 +1101,12 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
                   </li>
                 ))}
               </ul>
+              {API_ENABLED && !done && (
+                <p className="mt-1 rounded-lg bg-brand-wash px-3.5 py-2.5 text-[13px] leading-relaxed text-brand">
+                  {backgroundNote}
+                </p>
+              )}
+              </>
             ) : video ? (
               <>
             <div className="flex items-center gap-3 rounded-xl border border-line bg-surface-soft p-3">
@@ -1141,6 +1166,12 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
                 </div>
               )}
             </div>
+
+            {API_ENABLED && !done && (
+              <p className="mt-3.5 rounded-lg bg-brand-wash px-3.5 py-2.5 text-[13px] leading-relaxed text-brand">
+                {backgroundNote}
+              </p>
+            )}
 
             <div className="mt-4 flex flex-col gap-0.5">
               {stages.map((item, index) => {
