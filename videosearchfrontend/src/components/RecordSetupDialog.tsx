@@ -252,10 +252,17 @@ export function RecordSetupDialog({ open, onClose, onStart }: Props) {
         </div>
 
         {mode === 'screen' && (
-          <p className="mt-3 rounded-lg bg-surface-sunk px-3.5 py-2.5 text-[12.5px] leading-relaxed text-ink-dim">
-            Enable tab or system audio in the screen-share dialog to capture
-            shared audio.
-          </p>
+          <div className="mt-3 flex flex-col gap-1.5">
+            <p className="rounded-lg bg-surface-sunk px-3.5 py-2.5 text-[12.5px] leading-relaxed text-ink-dim">
+              Enable tab or system audio in the screen-share dialog to capture
+              shared audio.
+            </p>
+            <p className="rounded-lg bg-surface-sunk px-3.5 py-2.5 text-[12.5px] leading-relaxed text-ink-dim">
+              Switching tabs ends the capture if you share “This tab”. Pick
+              “Entire screen” or a window to keep recording while you switch
+              tabs or apps.
+            </p>
+          </div>
         )}
 
         {/* ── Devices ────────────────────────────────────── */}

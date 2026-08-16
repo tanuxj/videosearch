@@ -105,6 +105,10 @@ export default function Record() {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** Set when the browser (not the user) ends the capture — e.g. switching
+   *  away from a captured tab cuts it. Shown on the review screen so a
+   *  shortened recording reads as an interruption, not a mystery. */
+  const [captureCut, setCaptureCut] = useState<string | null>(null)
 
   const aliveRef = useRef(true)
   const combinedRef = useRef<MediaStream | null>(null)
@@ -171,11 +175,33 @@ export default function Record() {
   function stopLive() {
     captionsRef.current?.stop()
     setInterim('')
+    setCaptureCut(null)
     // The recorder's onstop builds the review and tears the sources down —
     // stopping the tracks there keeps the final chunk from being truncated.
     clearInterval(timerRef.current)
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
       recorderRef.current.stop()
+    }
+  }
+
+  /**
+   * The browser ended the capture (toolbar "Stop sharing", or — for a
+   * captured tab — switching away from it). Stop cleanly so the recorder
+   * flushes what it has, and when the tab was hidden at that moment, tell
+   * the user why the recording shortened: Chromium cuts tab captures when
+   * you switch away. "Entire screen" / a window keep recording across tabs.
+   */
+  function handleTrackEnded() {
+    if (!recorderRef.current || recorderRef.current.state === 'inactive') return
+    const wasHidden = document.hidden
+    stopLive()
+    if (wasHidden) {
+      setCaptureCut(
+        'Chrome stopped the capture because you switched away from the tab ' +
+          'being recorded — the recording up to that point is still saved. To ' +
+          'keep recording across tabs, pick “Entire screen” or a window in the ' +
+          'share dialog next time.',
+      )
     }
   }
 
@@ -196,6 +222,7 @@ export default function Record() {
     }
     stopAllSources()
     setLiveStream(null)
+    setCaptureCut(null)
     setPhase('idle')
     setConfig(null)
   }
@@ -206,6 +233,7 @@ export default function Record() {
       return
     }
     setError(null)
+    setCaptureCut(null)
     setCaptions([])
     setInterim('')
     setElapsed(0)
@@ -228,9 +256,11 @@ export default function Record() {
           stopStream(screen)
           return
         }
-        // "Stop sharing" in the browser's own UI ends the session cleanly
-        // instead of leaving a dead recorder running.
-        screen.getVideoTracks()[0]?.addEventListener('ended', stopLive)
+        // "Stop sharing" in the browser's own UI — or, for a captured tab,
+        // switching away from it — ends the session. Handle it cleanly
+        // instead of leaving a dead recorder running, and explain it when
+        // the tab was hidden (the switch-away case).
+        screen.getVideoTracks()[0]?.addEventListener('ended', handleTrackEnded)
         mic = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint })
         if (!aliveRef.current) {
           stopStream(screen)
@@ -407,6 +437,7 @@ export default function Record() {
     setCaptions([])
     setConfig(null)
     setElapsed(0)
+    setCaptureCut(null)
     setPhase('idle')
   }
 
@@ -586,6 +617,11 @@ export default function Record() {
         {/* ── Review ─────────────────────────────────────── */}
         {phase === 'review' && resultUrl && (
           <div className="flex flex-col gap-4">
+            {captureCut && (
+              <div className="rounded-lg border border-warn/30 bg-warn-wash px-3.5 py-2.5 text-[13px] leading-relaxed text-warn">
+                {captureCut}
+              </div>
+            )}
             <Panel
               title="Your recording"
               subtitle={`${isScreen ? 'Screen capture' : config?.cameraId ? 'Webcam' : 'Audio only'} · ${timecode(elapsed)} · ${(resultBlobRef.current?.size ?? 0) > 0 ? `${Math.round((resultBlobRef.current?.size ?? 0) / 1024)} KB` : ''}`}

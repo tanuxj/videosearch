@@ -95,6 +95,18 @@ def test_login_succeeds_with_correct_credentials(client: TestClient) -> None:
     assert response.json()["user"]["name"] == "Alex Rivera"
 
 
+def test_login_accepts_the_email_in_any_case(client: TestClient) -> None:
+    _signup(client)  # stored lowercase by normalize_email
+    client.cookies.clear()
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "ALEX@EXAMPLE.COM", "password": SIGNUP["password"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["user"]["email"] == "alex@example.com"
+
+
 def test_login_with_wrong_password_is_401(client: TestClient) -> None:
     _signup(client)
     response = client.post(
