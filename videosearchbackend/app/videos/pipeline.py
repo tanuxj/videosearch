@@ -3,17 +3,26 @@
 Runs as an in-process background job (FastAPI ``BackgroundTasks``), one per
 upload. Design notes:
 
-* **CPU work off the event loop.** Decoding + embedding run inside a worker
-  thread; results stream back through an ``asyncio.Queue`` so the async side
-  only does DB writes. The API keeps serving requests while a video indexes.
-* **Bounded memory.** The worker emits one chunk of ~32 frames at a time and
-  the async consumer persists it immediately, so a long video never holds
-  more than a few dozen decoded frames in memory.
-* **Real progress.** ``frames_total`` is set up front (from the file's frame
-  count) and ``frames_indexed`` increments per chunk, so the frontend's
-  status poll shows live progress. With scene-aware sampling the up-front
-  count is the fixed-rate estimate, so the consumer re-projects it from the
-  keep/candidate ratio each chunk and it converges to the real count.
+* **Keyframes, not every frame.** Sampling asks ffmpeg for keyframes only
+  (``-skip_frame nokey``), so the decoder skips every predicted frame in
+  between instead of decoding the whole stream to throw most of it away.
+  Encoders put keyframes at cuts, which is exactly where a scene search wants
+  samples. Measured ~4x faster than the full decode on a 2s-GOP 720p file and
+  far more on longer GOPs. Stretches with no keyframe are filled by a second,
+  ranged pass so a static shot still contributes frames.
+* **CPU work off the event loop, and overlapped.** Decode and embed run on two
+  worker threads with a bounded hand-off queue — they used to alternate in one
+  thread, where each stalled the other. Results stream back through an
+  ``asyncio.Queue`` so the async side only does DB writes, and the API keeps
+  serving requests while a video indexes.
+* **Bounded memory.** Frames leave the decoder already scaled to CLIP's 224x224
+  input, one chunk at a time, and the async consumer persists each chunk
+  immediately — so a long video never holds more than a few dozen small frames.
+* **Real progress.** ``frames_total`` is set up front (estimated from duration)
+  and ``frames_indexed`` increments per chunk, so the frontend's status poll
+  shows live progress. Keyframe sampling means the up-front number is only an
+  estimate, so the consumer re-projects it from the keep/candidate ratio each
+  chunk and it converges to the real count.
 * **Failure is explicit.** Any exception marks the video ``failed`` with the
   error message instead of leaving it stuck in ``processing`` forever.
 * **Transcription runs alongside, not after.** Speech recognition is seconds
@@ -24,16 +33,21 @@ upload. Design notes:
 """
 
 import asyncio
+import collections
 import contextlib
 import logging
 import math
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 import cv2
 import numpy as np
@@ -52,13 +66,64 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # Frames per embedding chunk — small enough to bound memory, large enough to
-# amortise CLIP's per-call overhead.
-_EMBED_CHUNK = 32
+# amortise CLIP's per-call overhead. Bigger than it was now that embedding has
+# its own thread: a larger batch means fewer hand-offs for the same work.
+_EMBED_CHUNK = 64
+
+# Chunks allowed to sit between the decode thread and the embed thread. Two is
+# enough to keep the embedder fed across a slow read without letting a fast
+# decoder build an unbounded backlog of decoded frames.
+_QUEUE_DEPTH = 2
 
 # Queue item kinds.
 _CHUNK = "chunk"
 _DONE = "done"
 _ERROR = "error"
+
+# Frames leave the sampler already at CLIP's input size: the decoder does the
+# scale and centre-crop, so no full-resolution frame is ever copied into Python.
+_SAMPLE_SIZE = embedder.CLIP_INPUT_SIZE
+_SAMPLE_BYTES = _SAMPLE_SIZE * _SAMPLE_SIZE * 3
+
+# Container timestamps are floats: an exact `>=` against a 1.0s interval would
+# drop the frame that lands on 0.9999999.
+_EPSILON = 1e-3
+
+# Timestamps are rounded to milliseconds before they reach the database. The
+# `(video_id, timestamp_sec)` unique constraint is what would otherwise turn a
+# sampler reporting one frame twice into a failed index.
+_TS_PLACES = 3
+
+# ffmpeg's `showinfo` filter logs one line per frame reaching the output, in
+# output order — that ordering is what pairs a timestamp with its frame.
+_PTS_TIME = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
+
+# Longest wait for the timestamp line belonging to a frame already read off
+# stdout. showinfo logs it before the frame is muxed, so this only trips when
+# ffmpeg isn't logging what we asked for.
+_PTS_WAIT_SECONDS = 30.0
+
+# Scale until the short edge reaches 224, centre-crop to 224x224 — the same
+# preprocessing CLIP's own processor applies, so these vectors stay
+# interchangeable with everything indexed before — then log the timestamps.
+_SAMPLE_FILTER = (
+    f"scale={_SAMPLE_SIZE}:{_SAMPLE_SIZE}:force_original_aspect_ratio=increase,"
+    f"crop={_SAMPLE_SIZE}:{_SAMPLE_SIZE},showinfo"
+)
+
+
+class SamplerUnavailable(Exception):
+    """ffmpeg could not sample this file — the caller falls back to OpenCV."""
+
+
+class _Stats(NamedTuple):
+    """What one indexing run did, for the completion log line."""
+
+    indexed: int
+    decode_seconds: float
+    embed_seconds: float
+    sampler: str
+    filled: int
 
 
 class AudioOnlyFile(Exception):
@@ -124,12 +189,16 @@ def _probe(cap) -> tuple[float, int]:
     return float(fps), frames
 
 
-def probe_file(path: Path) -> tuple[float, float, int]:
-    """(duration_seconds, sample_step, expected_sample_count) for a video file.
+def probe_file(path: Path) -> tuple[float, int]:
+    """(duration_seconds, expected_sample_count) for a video file.
 
     Cheap — reads container metadata only, no decoding. Run before indexing
     starts so ``frames_total`` is known up front and the status poll can show
     real progress instead of 0/0.
+
+    The count is the fixed-rate ceiling (one sample per
+    ``frame_interval_seconds``). Keyframe sampling normally lands well under
+    it, so the indexing consumer re-projects the denominator as it goes.
     """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -145,124 +214,412 @@ def probe_file(path: Path) -> tuple[float, float, int]:
     finally:
         cap.release()
 
-    step = max(1, round(fps * settings.frame_interval_seconds))
     duration = total_frames / fps if total_frames else 0.0
-    # Ceiling, not floor: frame 0 is sampled, so a 429-frame clip at step 30
-    # yields 15 samples (0, 30, … 420) — flooring reported 14 and made the
+    # Ceiling, not floor: the sample at t=0 counts, so 14.3s at one sample a
+    # second is 15 samples (0, 1, … 14) — flooring reported 14 and made the
     # progress bar read 15/14.
-    expected = -(-total_frames // step) if total_frames else 0
-    return duration, step, expected
+    expected = math.ceil(duration / settings.frame_interval_seconds) if duration else 0
+    return duration, expected
 
 
 def _scene_key(frame: np.ndarray) -> np.ndarray:
-    """Tiny grayscale proxy of a frame, used to compare successive samples.
+    """Tiny grayscale proxy of a sampled frame, for comparing successive ones.
 
-    36×64 downscaled gray is a few hundred bytes and `mean abs diff` on it is
+    36x64 downscaled gray is a few hundred bytes and `mean abs diff` on it is
     far cheaper than the CLIP embed it can skip — an obvious cost to pay on
     static-heavy footage.
     """
-    return cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (64, 36))
+    return cv2.resize(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY), (64, 36))
 
 
-def _process_video(
+def _read_exactly(stream, size: int) -> bytes | None:
+    """Read exactly `size` bytes from `stream`, or None once it ends.
+
+    A pipe's ``read(n)`` returns *up to* n bytes, so one call routinely comes
+    back with a partial frame — reassembling here is what stops frames from
+    being torn apart and misaligned against their timestamps.
+    """
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        part = stream.read(remaining)
+        if not part:
+            return None
+        chunks.append(part)
+        remaining -= len(part)
+    return b"".join(chunks)
+
+
+def _sampler_args(
     path: Path,
-    step: int,
-    emit,
     *,
-    scene_aware: bool,
-    scene_threshold: float,
-    max_gap_frames: int,
-) -> tuple[int, float, float]:
-    """Worker-thread body: decode + embed + emit chunks.
+    keyframes_only: bool,
+    seek: float | None = None,
+    span: float | None = None,
+    rate: float | None = None,
+) -> list[str]:
+    """ffmpeg argv that pipes 224x224 RGB frames to stdout, timestamps to stderr.
 
-    Returns (frames_indexed, decode_seconds, embed_seconds) — the split is
-    logged on completion so a slow index can be attributed without a profiler.
+    ``-vsync 0`` matters: without it the rawvideo muxer is free to duplicate
+    frames up to a constant rate, which would break the one-line-per-frame
+    pairing with `showinfo`. It is spelled the old way on purpose —
+    ``-fps_mode`` only exists from ffmpeg 5.1, and a system ffmpeg can be older.
+    """
+    args = [ffmpeg_binary(), "-hide_banner", "-loglevel", "info"]
+    if keyframes_only:
+        # Decoder-level: non-keyframes are discarded before being decoded.
+        args += ["-skip_frame", "nokey"]
+    # Both before `-i`: an input seek jumps to the nearest preceding keyframe
+    # instead of decoding the whole file up to the mark.
+    if seek is not None:
+        args += ["-ss", f"{seek:.3f}"]
+    if span is not None:
+        args += ["-t", f"{span:.3f}"]
+    args += ["-i", str(path), "-an", "-sn", "-dn", "-vsync", "0"]
+    filters = _SAMPLE_FILTER if rate is None else f"fps={rate:.6f},{_SAMPLE_FILTER}"
+    args += ["-vf", filters, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+    return args
 
-    `emit(timestamps, embeddings, kept, candidates)` is called on the worker
-    thread with one chunk at a time; the async caller bridges it onto the event
-    loop. `kept`/`candidates` are running totals so the caller can re-estimate
-    the progress denominator when scene-aware sampling is on (the up-front
-    metadata count is the fixed-rate estimate, not what will be embedded).
+
+def _ffmpeg_samples(args: list[str], *, offset: float = 0.0) -> Iterator[tuple[float, np.ndarray]]:
+    """Yield (timestamp, RGB frame) pairs from an ffmpeg rawvideo pipe.
+
+    Frames arrive on stdout as fixed-size rgb24 buffers; their timestamps
+    arrive on stderr as `showinfo` lines, one per frame, in the same order. A
+    reader thread keeps stderr drained — a full stderr pipe would deadlock
+    ffmpeg — and hands the timestamps over in order.
+
+    `offset` is added to every timestamp. An input ``-ss`` seek rebases the
+    stream to zero (measured: a pass seeked to 60s reports its first frame at
+    0.0), so a ranged fill pass reports times relative to its own start.
+
+    Raises :class:`SamplerUnavailable` when a frame arrives with no timestamp to
+    pair it with — a wrong timestamp would point a clip at the wrong moment, so
+    the run falls back to OpenCV rather than guessing — and when ffmpeg exits
+    non-zero, which otherwise reads as "the video ended here" and would leave a
+    half-indexed video marked ready.
+    """
+    proc = subprocess.Popen(  # noqa: S603 - fixed binary, no shell
+        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0
+    )
+    timestamps: queue.Queue = queue.Queue()
+    # Last few non-showinfo log lines, kept for the error message when ffmpeg
+    # exits non-zero — the reason is always in there somewhere.
+    complaints: collections.deque = collections.deque(maxlen=5)
+
+    def drain() -> None:
+        try:
+            for line in iter(proc.stderr.readline, b""):
+                text = line.decode("utf-8", "replace").strip()
+                match = _PTS_TIME.search(text)
+                if match is not None:
+                    timestamps.put(float(match.group(1)))
+                elif text:
+                    complaints.append(text)
+        finally:
+            # Sentinel: stderr closed, so no further timestamp is coming.
+            timestamps.put(None)
+
+    reader = threading.Thread(target=drain, name="ffmpeg-showinfo", daemon=True)
+    reader.start()
+    try:
+        while True:
+            buffer = _read_exactly(proc.stdout, _SAMPLE_BYTES)
+            if buffer is None:
+                break
+            try:
+                pts = timestamps.get(timeout=_PTS_WAIT_SECONDS)
+            except queue.Empty:
+                raise SamplerUnavailable("ffmpeg logged no timestamp for a frame") from None
+            if pts is None:
+                raise SamplerUnavailable("ffmpeg stopped logging timestamps")
+            frame = np.frombuffer(buffer, dtype=np.uint8).reshape(_SAMPLE_SIZE, _SAMPLE_SIZE, 3)
+            yield pts + offset, frame
+        # Reaching here is a real end of stream, so the exit status is
+        # meaningful (below, `terminate` is what ends an abandoned generator and
+        # its status says nothing). A file ffmpeg cannot read at all exits
+        # non-zero having produced nothing, which is how the fallback is reached.
+        proc.stdout.close()
+        if proc.wait(timeout=30) != 0:
+            reader.join(timeout=5)
+            raise SamplerUnavailable(
+                f"ffmpeg exited {proc.returncode}: {' | '.join(complaints) or 'no output'}"
+            )
+    finally:
+        # Closing the pipes makes ffmpeg exit on its next write if it is still
+        # running (an abandoned generator, a failure upstream).
+        for pipe in (proc.stdout, proc.stderr):
+            with contextlib.suppress(Exception):
+                pipe.close()
+        if proc.poll() is None:
+            proc.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+        reader.join(timeout=5)
+
+
+def _keyframe_samples(
+    path: Path, *, interval: float, max_gap: float, duration: float
+) -> Iterator[tuple[float, np.ndarray]]:
+    """Keyframes thinned to `interval` spacing, then sampling gaps filled.
+
+    Two properties of real files drive this:
+
+    * Most encoders emit a keyframe at every cut, so keyframe-only decoding
+      lands the frames a scene search wants and skips the rest of the stream.
+    * All-intra footage (MJPEG, ProRes, some screen recorders) makes *every*
+      frame a keyframe, which is why the `interval` thinning below is not
+      optional — without it such a file would embed at full frame rate.
+
+    Sparse-keyframe footage is the opposite problem: a locked-off camera or a
+    single-GOP screen recording can leave minutes with no keyframe at all.
+    Those stretches are filled afterwards by ranged passes, so samples are not
+    yielded in timestamp order — nothing downstream depends on that
+    (``search_clips`` sorts by timestamp), and the alternative is seeking
+    backwards mid-stream, which is what makes decoding slow in the first place.
+    """
+    # A gap only needs filling once it exceeds the sampling interval too —
+    # `scene_max_gap_seconds` below `frame_interval_seconds` is a legal config.
+    gap_limit = max(max_gap, interval)
+    gaps: list[tuple[float, float]] = []
+    last_kept: float | None = None
+
+    for timestamp, frame in _ffmpeg_samples(_sampler_args(path, keyframes_only=True)):
+        if last_kept is not None and timestamp - last_kept > gap_limit:
+            gaps.append((last_kept, timestamp))
+        if last_kept is None or timestamp - last_kept >= interval - _EPSILON:
+            last_kept = timestamp
+            yield timestamp, frame
+
+    # The tail is a gap like any other: a keyframe at 0:20 of an hour-long
+    # static shot must not leave the remaining 59 minutes unsampled.
+    if last_kept is not None and duration - last_kept > gap_limit:
+        gaps.append((last_kept, duration))
+
+    for start, end in gaps:
+        # Start one step in: the frame at `start` is the keyframe already
+        # yielded, and re-emitting it would collide on its timestamp.
+        fill_start = start + gap_limit
+        span = end - fill_start
+        if span <= _EPSILON:
+            continue
+        logger.debug("Filling %.1fs sampling gap at %.1fs in %s", span, fill_start, path.name)
+        try:
+            yield from _ffmpeg_samples(
+                _sampler_args(
+                    path, keyframes_only=False, seek=fill_start, span=span, rate=1.0 / gap_limit
+                ),
+                offset=fill_start,
+            )
+        except SamplerUnavailable as exc:
+            # Filling a gap is enrichment on top of a keyframe index that
+            # already exists — a seek ffmpeg refuses costs a few samples in one
+            # stretch, which is not worth failing the whole video over.
+            logger.warning(
+                "Could not fill the %.1fs gap at %.1fs in %s: %s",
+                span,
+                fill_start,
+                path.name,
+                exc,
+            )
+
+
+def _opencv_samples(path: Path, *, interval: float) -> Iterator[tuple[float, np.ndarray]]:
+    """Fixed-rate samples via OpenCV — the fallback when ffmpeg cannot sample.
 
     Decoding is a single forward pass: ``grab()`` advances the demuxer without
     decoding and only sampled frames are ``retrieve()``d. Seeking per frame
     instead (``CAP_PROP_POS_FRAMES``) forces a re-decode from the preceding
     keyframe on every read, which measured ~2x slower even on a keyframe-dense
     file and far worse on normal H.264.
-
-    Scene-aware sampling: a candidate is kept when its mean absolute pixel
-    difference (on the grayscale proxy) vs the last kept frame reaches
-    ``scene_threshold``, or when ``max_gap_frames`` candidates have passed
-    since the last keep — so a 10-minute static shot still contributes a few
-    frames, while a cut-heavy movie keeps every meaningful change and drops
-    the redundant in-between frames CLIP would otherwise embed for nothing.
     """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video file: {path.name}")
-
     try:
         fps, _ = _probe(cap)
-        frames: list[np.ndarray] = []
-        timestamps: list[float] = []
-        indexed = 0
-        frame_index = 0
-        embed_seconds = 0.0
-        started = time.perf_counter()
-        kept = 0
-        candidates = 0
-        since_keep = 0
-        last_key: np.ndarray | None = None
-
-        def flush() -> tuple[int, float]:
-            embed_started = time.perf_counter()
-            embeddings = embedder.embed_images(frames)
-            elapsed = time.perf_counter() - embed_started
-            emit(list(timestamps), embeddings, kept, candidates)
-            count = len(timestamps)
-            frames.clear()
-            timestamps.clear()
-            return count, elapsed
-
+        step = max(1, round(fps * interval))
+        index = 0
         while cap.grab():
-            if frame_index % step == 0:
+            if index % step == 0:
                 ok, frame = cap.retrieve()
                 if not ok:
                     break
-                candidates += 1
-
-                keep = True
-                if scene_aware:
-                    key = _scene_key(frame)
-                    since_keep += 1
-                    if last_key is not None:
-                        diff = float(
-                            np.mean(np.abs(key.astype(np.int16) - last_key.astype(np.int16)))
-                        )
-                        keep = diff >= scene_threshold or since_keep >= max_gap_frames
-                    if keep:
-                        last_key = key
-                        since_keep = 0
-
-                if keep:
-                    frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                    timestamps.append(frame_index / fps)
-                    kept += 1
-                    if len(frames) == _EMBED_CHUNK:
-                        count, elapsed = flush()
-                        indexed += count
-                        embed_seconds += elapsed
-            frame_index += 1
-
-        if frames:
-            count, elapsed = flush()
-            indexed += count
-            embed_seconds += elapsed
-
-        total = time.perf_counter() - started
-        return indexed, max(0.0, total - embed_seconds), embed_seconds
+                # Match the ffmpeg path: RGB, already at CLIP's input size.
+                yield index / fps, embedder.to_clip_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            index += 1
     finally:
         cap.release()
+
+
+def _iter_samples(
+    path: Path, *, sampler: str, interval: float, max_gap: float, duration: float
+) -> Iterator[tuple[float, np.ndarray]]:
+    """Sample one video, cheapest viable path first.
+
+    The ffmpeg keyframe sampler is the fast path; OpenCV is the fallback for
+    anything it cannot read. The fallback only applies before the first frame
+    is yielded — switching samplers mid-file would re-emit frames the caller
+    has already embedded.
+    """
+    if sampler == "opencv":
+        yield from _opencv_samples(path, interval=interval)
+        return
+
+    yielded = 0
+    try:
+        for sample in _keyframe_samples(
+            path, interval=interval, max_gap=max_gap, duration=duration
+        ):
+            yielded += 1
+            yield sample
+    except (SamplerUnavailable, OSError, subprocess.SubprocessError) as exc:
+        if yielded:
+            raise
+        logger.warning(
+            "ffmpeg sampling of %s unavailable (%s) — falling back to OpenCV", path.name, exc
+        )
+        yield from _opencv_samples(path, interval=interval)
+
+
+def _process_video(
+    path: Path,
+    emit,
+    *,
+    sampler: str,
+    interval: float,
+    max_gap: float,
+    duration: float,
+    scene_aware: bool,
+    scene_threshold: float,
+) -> _Stats:
+    """Worker-thread body: sample + embed, emitting one chunk at a time.
+
+    `emit(timestamps, embeddings, kept, candidates)` is called from the embed
+    thread with one chunk at a time; the async caller bridges it onto the event
+    loop. `kept`/`candidates` are running totals so the caller can re-estimate
+    the progress denominator — the up-front metadata count is the fixed-rate
+    ceiling, not what keyframe sampling actually embeds.
+
+    Sampling and embedding run on separate threads with a bounded hand-off
+    queue. They used to alternate in one thread, where decoding sat idle for the
+    length of every embed and vice versa; both release the GIL (ffmpeg is a
+    subprocess, onnxruntime releases it around inference), so overlapping them
+    is close to free.
+
+    Scene-aware sampling then drops samples whose picture did not really
+    change: a sample is embedded when its mean absolute pixel difference (on the
+    grayscale proxy) versus the last kept one reaches `scene_threshold`, or when
+    `max_gap` seconds have passed since the last keep. On a fixed-GOP encode —
+    keyframes every 2s whatever is happening on screen — this is what stops a
+    long static shot from being embedded over and over.
+
+    Returns the run's stats; `decode_seconds` and `embed_seconds` overlap in
+    wall-clock time and must not be summed.
+    """
+    work: queue.Queue = queue.Queue(maxsize=_QUEUE_DEPTH)
+    # Written by the embed thread, read here once it has been joined.
+    state: dict = {"indexed": 0, "embed_seconds": 0.0, "error": None}
+
+    def embed_worker() -> None:
+        while True:
+            item = work.get()
+            if item is None:
+                return
+            timestamps, frames, kept, candidates = item
+            try:
+                started = time.perf_counter()
+                embeddings = embedder.embed_images(frames)
+                state["embed_seconds"] += time.perf_counter() - started
+                emit(timestamps, embeddings, kept, candidates)
+                state["indexed"] += len(timestamps)
+            except Exception as exc:  # noqa: BLE001 - re-raised by the sampler below
+                state["error"] = exc
+                return
+
+    def submit(item) -> None:
+        """Hand a chunk to the embed thread, or re-raise that thread's failure.
+
+        The timeout is what keeps a dead embed thread from parking the sampler
+        on a full queue forever.
+        """
+        while True:
+            if state["error"] is not None:
+                raise state["error"]
+            try:
+                work.put(item, timeout=0.5)
+                return
+            except queue.Full:
+                continue
+
+    thread = threading.Thread(target=embed_worker, name="clip-embed", daemon=True)
+    thread.start()
+    started = time.perf_counter()
+    used_sampler = "opencv" if sampler == "opencv" else "keyframe"
+    frames: list[np.ndarray] = []
+    timestamps: list[float] = []
+    # Guards the frames table's (video_id, timestamp_sec) unique constraint: a
+    # container with duplicate keyframe timestamps must not fail the index.
+    seen: set[float] = set()
+    kept = 0
+    candidates = 0
+    filled = 0
+    last_key: np.ndarray | None = None
+    last_kept_time: float | None = None
+
+    try:
+        for timestamp, frame in _iter_samples(
+            path, sampler=sampler, interval=interval, max_gap=max_gap, duration=duration
+        ):
+            stamp = round(timestamp, _TS_PLACES)
+            if stamp in seen:
+                continue
+            candidates += 1
+            if last_kept_time is not None and timestamp < last_kept_time:
+                # Out of order, so this is a gap-fill sample — by definition
+                # from a stretch the keyframe pass had nothing for.
+                filled += 1
+
+            keep = True
+            key = _scene_key(frame) if scene_aware else None
+            if key is not None and last_key is not None:
+                difference = float(
+                    np.mean(np.abs(key.astype(np.int16) - last_key.astype(np.int16)))
+                )
+                stale = last_kept_time is None or timestamp - last_kept_time >= max_gap
+                keep = difference >= scene_threshold or stale
+            if not keep:
+                continue
+
+            if key is not None:
+                last_key = key
+            last_kept_time = timestamp
+            seen.add(stamp)
+            kept += 1
+            frames.append(frame)
+            timestamps.append(stamp)
+            if len(frames) == _EMBED_CHUNK:
+                submit((timestamps, frames, kept, candidates))
+                frames, timestamps = [], []
+
+        if frames:
+            submit((timestamps, frames, kept, candidates))
+    finally:
+        # The sentinel has to go in even on the failure path, or the embed
+        # thread never returns.
+        with contextlib.suppress(Exception):
+            work.put(None, timeout=30)
+        thread.join(timeout=300)
+
+    if state["error"] is not None:
+        raise state["error"]
+    return _Stats(
+        indexed=state["indexed"],
+        decode_seconds=time.perf_counter() - started,
+        embed_seconds=state["embed_seconds"],
+        sampler=used_sampler,
+        filled=filled,
+    )
 
 
 async def _insert_chunk(
@@ -405,7 +762,12 @@ async def transcribe_existing(video_id: uuid.UUID) -> None:
             local_path.unlink(missing_ok=True)
 
 
-async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> None:
+async def index_video(
+    video_id: uuid.UUID,
+    source_path: Path | None = None,
+    *,
+    own_source: bool = True,
+) -> None:
     """Run the full indexing pipeline for one video. Idempotent per video.
 
     Safe to call more than once: a video that is not ``processing`` is left
@@ -414,12 +776,14 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
     `source_path` is a local copy of the bytes the upload handler already had in
     hand. Passing it skips re-downloading the object that was just uploaded —
     for the R2 backend that round trip measured ~0.36 s/MB. Ownership transfers
-    to this function: the file is deleted when indexing finishes or fails.
+    to this function by default: the file is deleted when indexing finishes or
+    fails. Pass ``own_source=False`` when the caller still needs the bytes — the
+    URL import uploads the same file to storage while this runs.
     """
     local_path: Path | None = source_path
     # Only remove files we own — for the local backend `get_local_path` returns
     # the stored object itself, which must survive.
-    owns_local_file = source_path is not None
+    owns_local_file = source_path is not None and own_source
     transcript_task: asyncio.Task | None = None
     try:
         async with SessionFactory() as db:
@@ -436,7 +800,7 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
             # this is the fixed-rate ceiling; the consumer re-projects it per
             # chunk from the keep/candidate ratio.
             try:
-                duration, step, expected = await asyncio.to_thread(probe_file, local_path)
+                duration, expected = await asyncio.to_thread(probe_file, local_path)
             except AudioOnlyFile as exc:
                 # No video track (a mic-only recording, say): there is nothing
                 # to frame-index. Record the duration, mark the video ready
@@ -472,38 +836,41 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
                 _run_transcription(video_id, local_path, duration)
             )
 
-            max_gap_frames = max(
-                1, math.ceil(settings.scene_max_gap_seconds / settings.frame_interval_seconds)
-            )
-            queue: asyncio.Queue = asyncio.Queue()
+            # Named "chunks" rather than "queue": the stdlib queue module is
+            # imported for the sampler threads, and shadowing it here would be a
+            # trap for the next reader.
+            chunks: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
 
             def emit(timestamps: list, embeddings: list, kept: int, candidates: int) -> None:
                 loop.call_soon_threadsafe(
-                    queue.put_nowait, (_CHUNK, timestamps, embeddings, kept, candidates)
+                    chunks.put_nowait, (_CHUNK, timestamps, embeddings, kept, candidates)
                 )
 
             def worker() -> None:
                 try:
                     stats = _process_video(
                         local_path,
-                        step,
                         emit,
+                        sampler=settings.frame_sampler,
+                        interval=settings.frame_interval_seconds,
+                        max_gap=settings.scene_max_gap_seconds,
+                        duration=duration,
                         scene_aware=settings.scene_aware_sampling,
                         scene_threshold=settings.scene_threshold,
-                        max_gap_frames=max_gap_frames,
                     )
-                    loop.call_soon_threadsafe(queue.put_nowait, (_DONE, stats))
+                    loop.call_soon_threadsafe(chunks.put_nowait, (_DONE, stats))
                 except Exception as exc:  # pragma: no cover - surfaced via queue
-                    loop.call_soon_threadsafe(queue.put_nowait, (_ERROR, exc))
+                    loop.call_soon_threadsafe(chunks.put_nowait, (_ERROR, exc))
 
             # Worker runs on a thread; consumer runs here on the loop.
             started = time.perf_counter()
             worker_task = asyncio.create_task(asyncio.to_thread(worker))
 
-            decode_seconds = embed_seconds = db_seconds = 0.0
+            stats = _Stats(0, 0.0, 0.0, settings.frame_sampler, 0)
+            db_seconds = 0.0
             while True:
-                kind, *payload = await queue.get()
+                kind, *payload = await chunks.get()
                 if kind == _CHUNK:
                     timestamps, embeddings, kept, candidates = payload
                     if candidates > 0:
@@ -516,7 +883,7 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
                     await _insert_chunk(db, video, timestamps, embeddings)
                     db_seconds += time.perf_counter() - insert_started
                 elif kind == _DONE:
-                    _, decode_seconds, embed_seconds = payload[0]
+                    stats = payload[0]
                     break
                 elif kind == _ERROR:
                     raise payload[0]
@@ -538,13 +905,16 @@ async def index_video(video_id: uuid.UUID, source_path: Path | None = None) -> N
             )
             logger.info(
                 "Indexed video %s: %d frames over %.1fs of video in %.1fs "
-                "(decode %.1fs, embed %.1fs, db %.1fs)",
+                "(sampler %s, %d gap-filled; sample %.1fs and embed %.1fs overlap, "
+                "db %.1fs)",
                 video_id,
                 video.frames_indexed,
                 video.duration_seconds or 0.0,
                 wall_seconds,
-                decode_seconds,
-                embed_seconds,
+                stats.sampler,
+                stats.filled,
+                stats.decode_seconds,
+                stats.embed_seconds,
                 db_seconds,
             )
     except Exception as exc:  # noqa: BLE001 - any failure must be recorded

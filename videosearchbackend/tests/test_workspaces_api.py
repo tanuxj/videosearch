@@ -129,10 +129,7 @@ def test_delete_workspace_owner_only(client: TestClient) -> None:
         json={"email": "member@example.com", "role": "member"},
     )
 
-    assert (
-        client.delete(f"/api/v1/workspaces/{workspace_id}", headers=member).status_code
-        == 403
-    )
+    assert client.delete(f"/api/v1/workspaces/{workspace_id}", headers=member).status_code == 403
     response = client.delete(f"/api/v1/workspaces/{workspace_id}", headers=owner)
     assert response.status_code == 200, response.text
     assert client.get(f"/api/v1/workspaces/{workspace_id}", headers=owner).status_code == 404
@@ -268,9 +265,7 @@ def test_remove_member(client: TestClient) -> None:
         json={"email": "bob@example.com", "role": "member"},
     ).json()["user_id"]
 
-    response = client.delete(
-        f"/api/v1/workspaces/{workspace_id}/members/{bob_id}", headers=owner
-    )
+    response = client.delete(f"/api/v1/workspaces/{workspace_id}/members/{bob_id}", headers=owner)
     assert response.status_code == 200, response.text
 
     # The removed member loses access entirely.
@@ -307,9 +302,7 @@ def test_upload_into_workspace_sets_workspace_id(client: TestClient) -> None:
     video = _upload(client, owner, workspace_id=workspace_id)
 
     assert video["workspace_id"] == workspace_id
-    listing = client.get(
-        f"/api/v1/videos?workspace_id={workspace_id}", headers=owner
-    ).json()
+    listing = client.get(f"/api/v1/videos?workspace_id={workspace_id}", headers=owner).json()
     assert [item["id"] for item in listing["items"]] == [video["id"]]
 
 
@@ -382,13 +375,8 @@ def test_non_member_cannot_see_workspace_videos(client: TestClient) -> None:
     video = _upload(client, owner, workspace_id=workspace_id)
     stranger = _signup(client, email="stranger@example.com", name="Stranger")
 
-    assert (
-        client.get(f"/api/v1/videos/{video['id']}", headers=stranger).status_code == 404
-    )
-    assert (
-        client.get(f"/api/v1/videos/{video['id']}/stream", headers=stranger).status_code
-        == 404
-    )
+    assert client.get(f"/api/v1/videos/{video['id']}", headers=stranger).status_code == 404
+    assert client.get(f"/api/v1/videos/{video['id']}/stream", headers=stranger).status_code == 404
     assert client.get("/api/v1/videos", headers=stranger).json()["count"] == 0
 
 
@@ -398,9 +386,7 @@ def test_workspace_filter_hides_personal_videos(client: TestClient) -> None:
     _upload(client, owner, name="personal.mp4")
     _upload(client, owner, name="shared.mp4", workspace_id=workspace_id)
 
-    listing = client.get(
-        f"/api/v1/videos?workspace_id={workspace_id}", headers=owner
-    ).json()
+    listing = client.get(f"/api/v1/videos?workspace_id={workspace_id}", headers=owner).json()
     assert [item["name"] for item in listing["items"]] == ["shared.mp4"]
 
 
@@ -409,9 +395,7 @@ def test_workspace_filter_non_member_is_empty(client: TestClient) -> None:
     workspace_id = _create_workspace(client, owner)
     stranger = _signup(client, email="stranger@example.com", name="Stranger")
 
-    listing = client.get(
-        f"/api/v1/videos?workspace_id={workspace_id}", headers=stranger
-    ).json()
+    listing = client.get(f"/api/v1/videos?workspace_id={workspace_id}", headers=stranger).json()
     assert listing["count"] == 0
 
 
@@ -509,9 +493,7 @@ def test_workspace_member_can_file_shared_video_into_collection(
     )
     bob = _login(client, "bob@example.com")
 
-    created = client.post(
-        "/api/v1/collections", headers=bob, json={"name": "To review"}
-    )
+    created = client.post("/api/v1/collections", headers=bob, json={"name": "To review"})
     assert created.status_code == 201, created.text
     collection_id = created.json()["id"]
 

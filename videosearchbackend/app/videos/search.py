@@ -131,6 +131,15 @@ async def run_clip_search(
                 best[row.id] = (row.timestamp_sec, score, str(row.id))
 
     frames = sorted(best.values(), key=lambda frame: frame[0])
+    # Keyframe sampling spaces frames by content, not at a fixed rate. A video
+    # whose samples sit 6s apart cannot have a 2s window mean what it means at
+    # 1 fps — every scene would split into one clip per frame — so widen it to
+    # the video's real spacing. Only when the samples really are sparser than
+    # the configured interval: at nominal density the configured window is a
+    # deliberate choice and stands.
+    spacing = _sample_spacing(frames)
+    if spacing > settings.frame_interval_seconds:
+        merge_window = max(merge_window, spacing * 1.5)
     scenes = _merge_scenes(frames, min_score, merge_window)
 
     items = []
@@ -153,6 +162,18 @@ async def run_clip_search(
 
     items.sort(key=lambda item: item.score, reverse=True)
     return ClipSearchResult(items=items[:limit], min_score=min_score, expanded=expanded)
+
+
+def _sample_spacing(frames) -> float:
+    """Median gap between this video's frames, or 0 when there is nothing to go on.
+
+    The median rather than the mean: one long gap (a stretch of video with no
+    keyframe) must not stretch the merge window for the whole video.
+    """
+    if len(frames) < 2:
+        return 0.0
+    gaps = sorted(later[0] - earlier[0] for earlier, later in zip(frames, frames[1:], strict=False))
+    return gaps[len(gaps) // 2]
 
 
 def _merge_scenes(frames, min_score: float, merge_window: float) -> list[list]:

@@ -17,8 +17,11 @@ small, so there is nothing to gain from a second ONNX graph.
 The model is ~600 MB and takes tens of seconds to load, so it must never be
 imported eagerly: ``load()`` runs once, on first use, from whichever thread
 needs it (the indexing background task or a search request). A lock guards
-load, export and inference — torch CPU forward passes are not reentrant-safe
-for concurrent calls on the same model instance.
+load and export, and the torch forward pass — torch CPU inference is not
+reentrant-safe for concurrent calls on the same model instance. ONNX Runtime
+sessions *are* safe to ``run`` from several threads, and are deliberately not
+locked: two videos indexing at once would otherwise serialise on it, as would a
+search arriving mid-index.
 
 Embeddings are L2-normalised, which is what makes pgvector's cosine distance
 (`<=>`) a true similarity measure.
@@ -56,7 +59,11 @@ _vision_backend_failed = False
 # so handing it full-resolution frames pays PIL-conversion and (slow) processor
 # resize cost for pixels that are about to be thrown away. Downscaling here with
 # cv2 first measured ~4x faster end-to-end on a 720p batch.
-_INPUT_SIZE = 224
+#
+# Public, because the indexing pipeline has its decoder emit frames at exactly
+# this size — the geometry belongs to CLIP, so it is defined here once.
+CLIP_INPUT_SIZE = 224
+_INPUT_SIZE = CLIP_INPUT_SIZE
 
 
 def _ensure_model() -> Any:
@@ -91,14 +98,17 @@ def load() -> Any:
     return _model
 
 
-def _to_clip_input(frame: np.ndarray) -> Image.Image:
-    """Downscale an RGB frame to CLIP's 224x224 input and wrap it as a PIL Image.
+def to_clip_frame(frame: np.ndarray) -> np.ndarray:
+    """Downscale an RGB frame to CLIP's 224x224 input.
 
     Mirrors CLIP's own preprocessing — resize the shortest edge to 224, then
     centre-crop — so the resulting vectors stay interchangeable with ones
-    produced from full-resolution frames.
+    produced from full-resolution frames. A frame that is already 224x224 (the
+    indexing pipeline's decoder emits them that way) passes through untouched.
     """
     height, width = frame.shape[:2]
+    if height == _INPUT_SIZE and width == _INPUT_SIZE:
+        return frame
     scale = _INPUT_SIZE / min(height, width)
     # `round` (not floor) so the short edge never lands a pixel under 224.
     resized = cv2.resize(
@@ -110,7 +120,12 @@ def _to_clip_input(frame: np.ndarray) -> Image.Image:
     )
     top = (resized.shape[0] - _INPUT_SIZE) // 2
     left = (resized.shape[1] - _INPUT_SIZE) // 2
-    return Image.fromarray(resized[top : top + _INPUT_SIZE, left : left + _INPUT_SIZE])
+    return resized[top : top + _INPUT_SIZE, left : left + _INPUT_SIZE]
+
+
+def _to_clip_input(frame: np.ndarray) -> Image.Image:
+    """`to_clip_frame`, wrapped as the PIL Image the CLIP module requires."""
+    return Image.fromarray(to_clip_frame(frame))
 
 
 def _get_processor() -> Any:
@@ -267,8 +282,9 @@ def embed_images(images: list) -> list[list[float]]:
         processor = _get_processor()
         batch = processor(images=pil_images, return_tensors="pt")
         pixels = batch["pixel_values"].numpy()
-        with _lock:
-            vectors = session.run(None, {"pixel_values": pixels})[0]
+        # Unlocked on purpose: `InferenceSession.run` is thread-safe, and the
+        # indexing pipeline calls this from its own embed thread.
+        vectors = session.run(None, {"pixel_values": pixels})[0]
         # The exported graph already L2-normalises; the defensive re-normalise
         # costs nothing and keeps the invariant explicit.
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)

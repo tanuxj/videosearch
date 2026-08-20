@@ -98,9 +98,7 @@ def _list(client: TestClient, headers: dict[str, str]) -> dict:
 def test_notifications_require_auth(client: TestClient) -> None:
     assert client.get("/api/v1/notifications").status_code == 401
     assert client.post("/api/v1/notifications/read-all").status_code == 401
-    assert (
-        client.post(f"/api/v1/notifications/{uuid.uuid4()}/read").status_code == 401
-    )
+    assert client.post(f"/api/v1/notifications/{uuid.uuid4()}/read").status_code == 401
 
 
 # ── Listing ─────────────────────────────────────────────────
@@ -183,9 +181,7 @@ def test_mark_one_read(client: TestClient) -> None:
     _notify(video["id"], user_id)
     notification_id = _list(client, headers)["items"][0]["id"]
 
-    response = client.post(
-        f"/api/v1/notifications/{notification_id}/read", headers=headers
-    )
+    response = client.post(f"/api/v1/notifications/{notification_id}/read", headers=headers)
     assert response.status_code == 200, response.text
 
     body = _list(client, headers)
@@ -202,17 +198,12 @@ def test_mark_read_unknown_or_foreign_is_404(client: TestClient) -> None:
 
     # A random id is a 404…
     assert (
-        client.post(
-            f"/api/v1/notifications/{uuid.uuid4()}/read", headers=owner
-        ).status_code
-        == 404
+        client.post(f"/api/v1/notifications/{uuid.uuid4()}/read", headers=owner).status_code == 404
     )
     # …and so is someone else's notification — no existence leaks.
     stranger = _signup(client, email="stranger@example.com", name="Stranger")
     assert (
-        client.post(
-            f"/api/v1/notifications/{notification_id}/read", headers=stranger
-        ).status_code
+        client.post(f"/api/v1/notifications/{notification_id}/read", headers=stranger).status_code
         == 404
     )
 

@@ -256,12 +256,15 @@ def test_failed_index_cleans_up_partial_frames(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     """A failure after some chunks committed must not leak frame rows."""
-    # 40 frames at 1fps → the first _EMBED_CHUNK (32) commits, the second fails.
-    # Fixed-rate sampling (scene-aware off) so every frame is a candidate.
+    # One chunk more than the embedder takes at a time, so the first commits
+    # and the second fails. Sized off the constant rather than hardcoded — at a
+    # fixed 40 this test silently stopped spanning two chunks when the chunk
+    # size grew. Scene-aware sampling off so every frame is a candidate.
+    frame_count = pipeline._EMBED_CHUNK + 8
     monkeypatch.setattr(get_settings(), "scene_aware_sampling", False)
     path = tmp_path_factory.mktemp("clips") / "long.avi"
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 64))
-    for _ in range(40):
+    for _ in range(frame_count):
         writer.write(np.full((64, 64, 3), (255, 0, 0), dtype=np.uint8))
     writer.release()
 

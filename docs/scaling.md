@@ -41,7 +41,26 @@ requiring a rewrite.
 | UI indexing wait | ~5 min poll cap | `UploadDialog.tsx` |
 
 **Not limited:** number of videos, duration, frames per video.
-**Real ceilings:** R2 free tier (10 GB), CPU indexing speed (~1× realtime), RAM.
+**Real ceilings:** R2 free tier (10 GB), CPU indexing speed, RAM.
+
+### Indexing speed today
+
+Sampling asks ffmpeg for keyframes only and embeds them on a second thread, so
+indexing is no longer bound by decoding every frame:
+
+| Source (720p) | Sampling throughput | Frames embedded per minute of video |
+|---|---|---|
+| 2s GOP (typical re-encode) | ~150× realtime | ~10-30 |
+| 20s GOP (locked-off camera, screen recording) | ~20× realtime | ~5 |
+
+The sparse-keyframe case is slower because stretches with no keyframe are
+filled by a second ranged pass, which decodes those stretches for real — that
+is the honest cost of footage with nothing to sample. Both cases embed far
+fewer frames than the old fixed 1 fps (60/minute), and embedding is what CPU
+time actually goes on.
+
+URL imports are capped at 720p (`URL_IMPORT_FORMAT`) and fetch DASH fragments
+in parallel, and the upload to R2 now overlaps indexing instead of blocking it.
 
 ---
 
@@ -50,7 +69,7 @@ requiring a rewrite.
 | Bottleneck | Why it breaks | Fix |
 |---|---|---|
 | **Indexing jobs** | `BackgroundTasks` run inside the API process. Restart → job dies. Multiple workers → multiple 600 MB model copies. No retries/queue. | Extract to a job queue + separate worker |
-| **CPU inference** | CLIP on CPU ≈ real-time. 10 concurrent uploads slow the whole API. | GPU worker (serverless) |
+| **CPU inference** | CLIP on CPU is the remaining floor once decoding stops dominating. 10 concurrent uploads slow the whole API. | GPU worker (serverless) |
 | **Uploads through the API** | FastAPI buffers the whole multipart body in RAM (see `service.py` note). Large files × N = OOM. | Presigned URLs → browser uploads straight to R2 (multipart chunks past 5 GiB) |
 | **Playback through the API** | Every byte-range request proxies through the API → egress + CPU. | Presigned GET + CDN on the bucket |
 | **Single Postgres** | Contention between writes (indexing) and reads (search/stream auth). | Managed Postgres, later read replicas |
@@ -203,7 +222,7 @@ videosearchbackend/
 │       ├── routes.py      # upload/list/status/stream/delete (BackgroundTasks here)
 │       ├── service.py     # business logic; upload cap, extension allowlist
 │       ├── storage.py     # R2/local facade; presigned/stream hooks go here
-│       ├── pipeline.py    # 1 fps extract → CLIP embed → pgvector insert
+│       ├── pipeline.py    # keyframe sample → CLIP embed → pgvector insert
 │       ├── embedder.py    # lazy CLIP singleton (image + text)
 │       └── search.py      # POST /search/clips  (pgvector `<=>`)
 videosearchfrontend/

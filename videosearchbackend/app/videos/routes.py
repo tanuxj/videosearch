@@ -278,12 +278,12 @@ async def import_from_url(
 
     try:
         video = await videos_service.create_url_video(
-        db,
-        owner_id=user.id,
-        title=info["title"],
-        ext=info["ext"],
-        workspace_id=payload.workspace_id,
-    )
+            db,
+            owner_id=user.id,
+            title=info["title"],
+            ext=info["ext"],
+            workspace_id=payload.workspace_id,
+        )
     except videos_service.VideoForbidden as exc:
         raise _workspace_forbidden() from exc
     # Fire-and-forget: the response returns immediately with status

@@ -644,3 +644,143 @@ class TestFromUrlsApi:
         _, _, prompt, clip_limit = started[0]
         assert prompt == "a red car driving on a highway"
         assert clip_limit == 5
+
+
+class TestImportVideoJob:
+    """The background import job itself: download, store, index.
+
+    Every other route test stubs `import_video` out, so this is where the job's
+    own wiring is checked — in particular that storing to the bucket and
+    indexing overlap, and that a video whose bytes never reached storage does
+    not end up sitting there as `ready` with nothing to play.
+    """
+
+    pytestmark = needs_db
+
+    @staticmethod
+    def _reserve(client, monkeypatch: pytest.MonkeyPatch):
+        """A `processing` video row, as `POST /videos/from-url` leaves one.
+
+        Returns `(video_id, import_video)`. The route is stopped from launching
+        the real job by patching the very attribute these tests then want to
+        call, so the undecorated function comes back with the id.
+        """
+        monkeypatch.setattr(url_import, "validate_url", lambda raw: raw.strip())
+        monkeypatch.setattr(
+            url_import,
+            "probe_url",
+            lambda url, *, max_bytes: {
+                "title": "Big Buck Bunny",
+                "ext": "mp4",
+                "duration": 600,
+                "size": 1234,
+            },
+        )
+        real_import_video = url_import.import_video
+        monkeypatch.setattr(url_import, "import_video", lambda *args, **kwargs: None)
+        response = client.post("/api/v1/auth/signup", json=SIGNUP)
+        headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+        created = client.post(
+            "/api/v1/videos/from-url",
+            headers=headers,
+            json={"url": "https://example.com/big-buck-bunny.mp4"},
+        )
+        assert created.status_code == 201, created.text
+        return created.json()["id"], real_import_video
+
+    @staticmethod
+    def _fake_download(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Skip the network: drop a small file where the downloader would."""
+
+        def download(url, dest_dir, *, max_bytes, format_spec):
+            target = dest_dir / "clip.mp4"
+            target.write_bytes(_FakeVideoHandler.body)
+            return target, "Big Buck Bunny", "mp4"
+
+        monkeypatch.setattr(url_import, "download_video", download)
+
+    def test_storing_overlaps_indexing(self, client, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The upload to storage must not be a barrier in front of indexing.
+
+        Deterministic rather than timing-based: the fake upload refuses to
+        finish until indexing has started. Ordering the two sequentially cannot
+        pass this — it would sit on the event until the timeout.
+        """
+        import uuid as uuid_module
+
+        from app.videos import pipeline
+        from app.videos.storage import storage
+
+        video_id, import_video = self._reserve(client, monkeypatch)
+        self._fake_download(monkeypatch)
+
+        indexing_started = threading.Event()
+        stored = threading.Event()
+
+        def save_path(key, source, content_type):
+            if not indexing_started.wait(timeout=10):
+                raise AssertionError("storage upload was awaited before indexing began")
+            stored.set()
+
+        async def index_video(video_id, source_path=None, *, own_source=True):
+            # The import still owns the file: the upload is reading it.
+            assert own_source is False
+            assert source_path is not None and source_path.exists()
+            indexing_started.set()
+
+        monkeypatch.setattr(storage, "save_path", save_path)
+        monkeypatch.setattr(pipeline, "index_video", index_video)
+
+        client.portal.call(import_video, uuid_module.UUID(video_id), "https://x/y.mp4")
+
+        assert stored.is_set()
+
+    def test_failed_storage_fails_an_already_indexed_video(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Indexing succeeding does not make an unstored video importable.
+
+        Because the two now overlap, the upload can fail *after* indexing has
+        marked the video ready — leaving a searchable video whose bytes are not
+        in the bucket. That has to come back as `failed`.
+        """
+        import uuid as uuid_module
+
+        from app.db.session import SessionFactory
+        from app.videos import pipeline
+        from app.videos.models import Video
+        from app.videos.storage import storage
+
+        video_id, import_video = self._reserve(client, monkeypatch)
+        self._fake_download(monkeypatch)
+
+        def save_path(key, source, content_type):
+            raise RuntimeError("bucket unreachable")
+
+        async def index_video(video_id, source_path=None, *, own_source=True):
+            async with SessionFactory() as db:
+                video = await db.get(Video, video_id)
+                video.status = "ready"
+                await db.commit()
+
+        monkeypatch.setattr(storage, "save_path", save_path)
+        monkeypatch.setattr(pipeline, "index_video", index_video)
+
+        client.portal.call(import_video, uuid_module.UUID(video_id), "https://x/y.mp4")
+
+        body = client.get(
+            f"/api/v1/videos/{video_id}",
+            headers=self._auth_headers_for(client),
+        ).json()
+        assert body["status"] == "failed"
+        assert "bucket unreachable" in body["error"]
+
+    @staticmethod
+    def _auth_headers_for(client) -> dict[str, str]:
+        """Log the reserved video's owner back in (signup already happened)."""
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"email": SIGNUP["email"], "password": SIGNUP["password"]},
+        )
+        assert response.status_code == 200, response.text
+        return {"Authorization": f"Bearer {response.json()['access_token']}"}

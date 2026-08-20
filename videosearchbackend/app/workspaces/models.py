@@ -106,6 +106,5 @@ class WorkspaceMember(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return (  # noqa: E501 - debugging aid, not user-facing
-            f"<WorkspaceMember workspace={self.workspace_id} "
-            f"user={self.user_id} role={self.role}>"
+            f"<WorkspaceMember workspace={self.workspace_id} user={self.user_id} role={self.role}>"
         )

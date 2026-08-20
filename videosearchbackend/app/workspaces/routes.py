@@ -89,9 +89,7 @@ async def list_workspaces(user: CurrentUser, db: DbSession) -> WorkspaceListOut:
 async def create_workspace(
     user: CurrentUser, db: DbSession, payload: WorkspaceCreateIn
 ) -> WorkspaceOut:
-    workspace = await workspaces_service.create_workspace(
-        db, user_id=user.id, name=payload.name
-    )
+    workspace = await workspaces_service.create_workspace(db, user_id=user.id, name=payload.name)
     return WorkspaceOut.model_validate(workspace).model_copy(
         update={"role": "owner", "member_count": 1}
     )
@@ -232,8 +230,7 @@ async def invite_member(
     response_model=WorkspaceMemberOut,
     summary="Change a member's role",
     description=(
-        "Owner or admin may change any non-owner member's role. The owner's "
-        "role is immutable."
+        "Owner or admin may change any non-owner member's role. The owner's role is immutable."
     ),
     responses={
         403: {"description": "Role too low"},

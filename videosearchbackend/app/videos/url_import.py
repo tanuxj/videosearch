@@ -31,6 +31,7 @@ Safety:
 """
 
 import asyncio
+import contextlib
 import ipaddress
 import logging
 import shutil
@@ -44,6 +45,7 @@ from pathlib import Path
 from app.core.config import get_settings
 from app.db.session import SessionFactory
 from app.videos import pipeline, search, service
+from app.videos.clips import ffmpeg_binary
 from app.videos.models import Video
 from app.videos.saved_clips import save_clips
 from app.videos.storage import storage
@@ -335,11 +337,20 @@ def _download_with_ytdlp(
             over_limit["hit"] = True
             raise _AbortDownload()
 
+    settings = get_settings()
     opts = {
         "outtmpl": str(dest_dir / "%(title).120s [%(id)s].%(ext)s"),
-        # Prefer a single progressive MP4: plays in browsers with no ffmpeg
-        # merge step. `b` (any single file) is the fallback.
+        # Resolution-capped, H.264-first (see `url_import_format`).
         "format": format_spec,
+        # The capped formats are DASH on most hosts, so a merge is expected —
+        # point yt-dlp at the same ffmpeg the rest of the app uses rather than
+        # relying on one being on PATH, and land the result in a container
+        # browsers will play.
+        "ffmpeg_location": ffmpeg_binary(),
+        "merge_output_format": "mp4",
+        # Fragmented sources download in parallel; this is most of the
+        # difference between a slow import and a fast one on a long video.
+        "concurrent_fragment_downloads": settings.url_import_concurrent_fragments,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -419,19 +430,38 @@ async def import_video(
     """
     path: Path | None = None
     tmp_dir: Path | None = None
+    store_task: asyncio.Task | None = None
     try:
-        path, tmp_dir = await _download_and_store(video_id, url)
-        # `source_path` transfers ownership: the pipeline deletes it when
-        # done (or fails), exactly like a staged upload.
-        await pipeline.index_video(video_id, source_path=path)
+        path, tmp_dir = await _download(video_id, url)
+        # Uploading to storage and indexing both read the downloaded file and
+        # neither needs the other's result, so they run together — the upload
+        # is a full pass over the bytes (~0.36 s/MB against R2) and used to be
+        # pure dead time before indexing could start. `own_source=False`
+        # because this function owns the file until both are done.
+        store_task = asyncio.create_task(_store(video_id, path))
+        await pipeline.index_video(video_id, source_path=path, own_source=False)
         if prompt and clip_limit > 0:
             await _autoextract_clips(video_id, prompt, clip_limit)
+        # A video whose bytes never reached storage is not importable, however
+        # well the indexing went — it would be `ready` with nothing to play.
+        # `force` because indexing has already moved it off `processing`.
+        try:
+            await store_task
+        except Exception as exc:  # noqa: BLE001 - reported on the video row
+            logger.exception("URL import could not store video %s", video_id)
+            await _mark_failed(
+                video_id, f"Could not save the downloaded video: {_brief(exc)}", force=True
+            )
     except Exception as exc:  # noqa: BLE001 - any failure must be recorded
         logger.exception("URL import failed for video %s", video_id)
-        if path is not None:
-            path.unlink(missing_ok=True)
         await _mark_failed(video_id, str(exc))
     finally:
+        if store_task is not None and not store_task.done():
+            # The indexing path raised; nothing is going to read the upload's
+            # result, and the file it is reading is about to be deleted.
+            store_task.cancel()
+            with contextlib.suppress(BaseException):
+                await store_task
         if tmp_dir is not None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -471,11 +501,11 @@ async def _autoextract_clips(video_id: uuid.UUID, prompt: str, limit: int) -> No
         logger.exception("Auto-extract failed for video %s — the video stays indexed", video_id)
 
 
-async def _download_and_store(video_id: uuid.UUID, url: str) -> tuple[Path, Path]:
-    """Download `url` to a temp dir and persist it under the video's key.
+async def _download(video_id: uuid.UUID, url: str) -> tuple[Path, Path]:
+    """Download `url` to a temp dir and record what arrived on the video row.
 
     Returns ``(local_path, temp_dir)`` — the caller hands `local_path` to the
-    pipeline (which deletes it) and owns cleaning up `temp_dir`.
+    pipeline and to :func:`_store`, and owns cleaning up `temp_dir`.
     """
     settings = get_settings()
     tmp_dir = Path(tempfile.mkdtemp(prefix="videosearch-url-"))
@@ -504,13 +534,11 @@ async def _download_and_store(video_id: uuid.UUID, url: str) -> tuple[Path, Path
         if f".{ext}" != Path(video.storage_key).suffix.lower():
             video.storage_key = str(Path(video.storage_key).with_suffix(f".{ext}"))
 
-        content_type = service.MEDIA_TYPES.get(f".{ext}", "video/mp4")
-        await asyncio.to_thread(storage.save_path, video.storage_key, path, content_type)
         video.name = service.display_name(title, ext)
         video.size_bytes = path.stat().st_size
         await db.commit()
         logger.info(
-            "URL import stored video %s: %s (%d bytes)",
+            "URL import downloaded video %s: %s (%d bytes)",
             video.id,
             video.name,
             video.size_bytes,
@@ -518,11 +546,34 @@ async def _download_and_store(video_id: uuid.UUID, url: str) -> tuple[Path, Path
     return path, tmp_dir
 
 
-async def _mark_failed(video_id: uuid.UUID, message: str) -> None:
+async def _store(video_id: uuid.UUID, path: Path) -> None:
+    """Upload the downloaded file to storage under the video's key.
+
+    Runs concurrently with indexing, which reads the same local file. Reads the
+    key back from the row rather than taking it as an argument, so it cannot go
+    stale against the extension correction in :func:`_download`.
+    """
+    async with SessionFactory() as db:
+        video = await db.get(Video, video_id)
+        if video is None:
+            raise UrlImportError("This video is no longer being imported.")
+        storage_key = video.storage_key
+    content_type = service.MEDIA_TYPES.get(Path(storage_key).suffix.lower(), "video/mp4")
+    await asyncio.to_thread(storage.save_path, storage_key, path, content_type)
+    logger.info("URL import stored video %s at %s", video_id, storage_key)
+
+
+async def _mark_failed(video_id: uuid.UUID, message: str, *, force: bool = False) -> None:
+    """Record an import failure on the video row. Best effort — never raises.
+
+    Only touches a row still ``processing`` unless `force` is set: a failure
+    that surfaces after indexing already marked the video ``ready`` (storage,
+    say) still has to override that.
+    """
     try:
         async with SessionFactory() as db:
             video = await db.get(Video, video_id)
-            if video is not None and video.status == "processing":
+            if video is not None and (force or video.status == "processing"):
                 video.status = "failed"
                 video.error = message[:500]
                 await db.commit()

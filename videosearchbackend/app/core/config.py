@@ -116,7 +116,22 @@ class Settings(BaseSettings):
     # Start the indexing job automatically on upload. Tests flip this off
     # so uploads stay `processing` until the test runs the pipeline itself.
     index_on_upload: bool = True
-    # Frames are sampled at this interval (seconds). 1.0 = one frame per second.
+    # How frames are sampled out of a video.
+    #
+    # "keyframe" (default) asks ffmpeg for keyframes only, so the decoder skips
+    # every predicted frame instead of decoding the whole stream to throw most
+    # of it away. Encoders put keyframes at cuts, which is where a scene search
+    # wants samples anyway: measured ~4x faster than a full decode on a 2s-GOP
+    # 720p file, and ~14x on a 20s-GOP one. Stretches with no keyframe are
+    # filled by a second ranged pass (see `scene_max_gap_seconds`), and
+    # all-intra footage is thinned back to `frame_interval_seconds`.
+    #
+    # "opencv" forces the old fixed-rate decode-everything loop. The keyframe
+    # sampler already falls back to it per-file when ffmpeg cannot read
+    # something, so this is only for reproducing the old behaviour wholesale.
+    frame_sampler: Literal["keyframe", "opencv"] = "keyframe"
+    # Closest two samples may be (seconds). 1.0 = at most one frame per second.
+    # With the keyframe sampler this is a floor on spacing, not a fixed rate.
     frame_interval_seconds: float = 1.0
     # Scene-aware sampling: a sampled frame is embedded only when its picture
     # actually changed versus the last kept frame, so long static-heavy files
@@ -143,6 +158,13 @@ class Settings(BaseSettings):
     # Consecutive matching frames closer than this (seconds) are merged into a
     # single scene, so a multi-second moment reads as one clip with a real
     # start and end rather than several overlapping single-frame windows.
+    #
+    # Tuned for `frame_interval_seconds` spacing. Keyframe sampling leaves the
+    # frames further apart than that on some files, and a window narrower than
+    # a video's own sample spacing would split every scene into one clip per
+    # frame — so for those videos the search widens this to match the spacing
+    # it actually has. Videos sampled at the configured density use this value
+    # as-is.
     search_merge_window_seconds: float = Field(default=2.0, ge=0.0)
 
     # ── LLM query expansion (the "middleman") ──────────────────
@@ -198,10 +220,22 @@ class Settings(BaseSettings):
     # Cap on a URL-downloaded video (bytes). Defaults to the same 10 GiB
     # ceiling as file uploads — the user chose no separate cap.
     url_import_max_bytes: int = Field(default=10 * 1024**3, ge=1)
-    # yt-dlp format preference. A single progressive MP4 plays in browsers
-    # without an ffmpeg merge step; anything else is a fallback (webm plays,
-    # mkv indexes but may not play back in the app).
-    url_import_format: str = "b[ext=mp4]/b"
+    # yt-dlp format preference. Capped at 720p: CLIP sees 224x224, so pixels
+    # above that are download time spent on nothing, and 720p is still a
+    # reasonable size to play a clip back at. An hour of 720p is ~300-500 MB
+    # against several GB for the same video in 4K.
+    #
+    # H.264 + AAC first (browsers play it, and yt-dlp only has to remux, not
+    # re-encode), then any 720p video+audio pair, then a single progressive
+    # file, then whatever exists — a video that only comes in 1080p is still
+    # better imported than refused.
+    url_import_format: str = (
+        "bv*[height<=720][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=720]+ba/b[height<=720]/b"
+    )
+    # Fragments fetched in parallel for DASH/HLS sources. YouTube serves the
+    # capped formats above as DASH, so this is what turns a long single-stream
+    # download into a parallel one. Above ~8 the bottleneck moves to the host.
+    url_import_concurrent_fragments: int = Field(default=8, ge=1, le=32)
     # How long the pre-download metadata probe (yt-dlp extract_info) may run
     # before the request fails. Keeps a slow or unresponsive site from
     # hanging the paste-a-link call.

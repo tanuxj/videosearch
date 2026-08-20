@@ -21,8 +21,7 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
     response_model=NotificationListOut,
     summary="List my notifications",
     description=(
-        "The caller's notifications, newest first, plus the unread count "
-        "for the bell's badge."
+        "The caller's notifications, newest first, plus the unread count for the bell's badge."
     ),
 )
 async def list_notifications(user: CurrentUser, db: DbSession) -> NotificationListOut:

@@ -42,9 +42,7 @@ def upgrade() -> None:
         "CREATE UNIQUE INDEX uq_notifications_user_video_kind "
         "ON notifications (user_id, video_id, kind)"
     )
-    op.execute(
-        "CREATE INDEX ix_notifications_video_id ON notifications (video_id)"
-    )
+    op.execute("CREATE INDEX ix_notifications_video_id ON notifications (video_id)")
 
 
 def downgrade() -> None:

@@ -87,9 +87,7 @@ async def is_member(db: AsyncSession, workspace_id: uuid.UUID, user_id: uuid.UUI
     return await _member_row(db, workspace_id, user_id) is not None
 
 
-async def member_role(
-    db: AsyncSession, workspace_id: uuid.UUID, user_id: uuid.UUID
-) -> str | None:
+async def member_role(db: AsyncSession, workspace_id: uuid.UUID, user_id: uuid.UUID) -> str | None:
     """The caller's role in the workspace, or None when not a member."""
     row = await _member_row(db, workspace_id, user_id)
     return row.role if row else None
@@ -116,9 +114,7 @@ async def _require_manager(
     return workspace
 
 
-async def list_workspaces(
-    db: AsyncSession, user_id: uuid.UUID
-) -> list[tuple[Workspace, str, int]]:
+async def list_workspaces(db: AsyncSession, user_id: uuid.UUID) -> list[tuple[Workspace, str, int]]:
     """The user's workspaces as (workspace, my_role, member_count).
 
     One query for the whole list: membership rows are joined to workspaces
@@ -139,9 +135,7 @@ async def list_workspaces(
     return [(row[0], row[1], row[2]) for row in result.all()]
 
 
-async def create_workspace(
-    db: AsyncSession, *, user_id: uuid.UUID, name: str
-) -> Workspace:
+async def create_workspace(db: AsyncSession, *, user_id: uuid.UUID, name: str) -> Workspace:
     """Create a workspace with the caller as its sole owner member."""
     workspace = Workspace(name=name.strip(), created_by=user_id)
     db.add(workspace)
@@ -248,9 +242,7 @@ async def invite_member(
         await db.rollback()
         raise AlreadyMember(email) from exc
     await db.refresh(member)
-    logger.info(
-        "Invited %s to workspace %s as %s", email, workspace_id, role
-    )
+    logger.info("Invited %s to workspace %s as %s", email, workspace_id, role)
     return member
 
 
@@ -272,9 +264,7 @@ async def set_member_role(
     target.role = role
     await db.commit()
     await db.refresh(target)
-    logger.info(
-        "Role for %s in workspace %s changed to %s", target_user_id, workspace_id, role
-    )
+    logger.info("Role for %s in workspace %s changed to %s", target_user_id, workspace_id, role)
     return target
 
 
