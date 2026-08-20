@@ -225,6 +225,8 @@ async def create_url_video(
     owner_id: uuid.UUID,
     title: str,
     ext: str,
+    size_bytes: int = 0,
+    duration_seconds: float = 0.0,
     workspace_id: uuid.UUID | None = None,
 ) -> Video:
     await _require_workspace_editor(db, owner_id, workspace_id)
@@ -232,8 +234,12 @@ async def create_url_video(
 
     The storage key uses the extension the metadata probe reported; the
     background download adjusts it if the real container differs (nothing has
-    been stored under the key yet). `size_bytes` starts at 0 and is filled in
-    once the download lands.
+    been stored under the key yet).
+
+    `size_bytes` and `duration_seconds` are the probe's figures, so the library
+    row reads as a real video straight away rather than "0 B" for the length of
+    the download. Both are replaced with measured values once the file lands —
+    the probe's size is an estimate, and some hosts report neither.
     """
     ext = (ext or "mp4").lower().lstrip(".") or "mp4"
     video_id = uuid.uuid4()
@@ -241,7 +247,8 @@ async def create_url_video(
         owner_id=owner_id,
         workspace_id=workspace_id,
         name=display_name(title, ext),
-        size_bytes=0,
+        size_bytes=max(0, size_bytes or 0),
+        duration_seconds=max(0.0, duration_seconds or 0.0),
         status="processing",
         source="url",
         storage_key=object_key(owner_id, video_id, ext),

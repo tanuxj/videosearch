@@ -369,7 +369,11 @@ class TestFromUrlApi:
         body = response.json()
         assert body["status"] == "processing"
         assert body["name"] == "Big Buck Bunny.mp4"
-        assert body["size_bytes"] == 0
+        # The probe's size and duration land on the row straight away, so the
+        # library shows a real video during the download instead of "0 B".
+        # Both are replaced with measured values once the file has landed.
+        assert body["size_bytes"] == 1234
+        assert body["duration_seconds"] == 600
         assert "storage_key" not in body
 
         # The row is listed like any other video, and the background import

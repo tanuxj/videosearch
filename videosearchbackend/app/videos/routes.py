@@ -282,6 +282,8 @@ async def import_from_url(
             owner_id=user.id,
             title=info["title"],
             ext=info["ext"],
+            size_bytes=info.get("size") or 0,
+            duration_seconds=info.get("duration") or 0.0,
             workspace_id=payload.workspace_id,
         )
     except videos_service.VideoForbidden as exc:
@@ -432,6 +434,8 @@ async def import_from_urls(
             video = await videos_service.create_url_video(
                 db,
                 owner_id=user.id,
+                size_bytes=outcome.get("size") or 0,
+                duration_seconds=outcome.get("duration") or 0.0,
                 title=outcome["title"],
                 ext=outcome["ext"],
                 workspace_id=payload.workspace_id,
