@@ -5,7 +5,7 @@ import { cn } from '../lib/cn'
 import { ButtonLink } from './ui/Button'
 import {
   GridIcon,
-  HistoryIcon,
+  FilmIcon,
   MicIcon,
   RecordIcon,
   SearchIcon,
@@ -124,7 +124,7 @@ export function MarketingShell({ children }: { children: ReactNode }) {
 
 const NAV_MAIN = [
   { to: '/search', label: 'Search', icon: SearchIcon },
-  { to: '/history', label: 'History', icon: HistoryIcon },
+  { to: '/clips', label: 'Clips', icon: FilmIcon },
   { to: '/record', label: 'Record', icon: RecordIcon },
   { to: '/recordings', label: 'Recordings', icon: MicIcon },
   { to: '/workspaces', label: 'Teams', icon: TeamsIcon },

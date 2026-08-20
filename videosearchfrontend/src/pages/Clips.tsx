@@ -20,7 +20,7 @@ import { EmptyState, Panel } from '../components/ui/Data'
 import {
   ArrowRightIcon,
   ChevronIcon,
-  HistoryIcon,
+  FilmIcon,
   PlayIcon,
   TrashIcon,
 } from '../components/Icons'
@@ -31,12 +31,12 @@ import { relativeTime, timecode } from '../lib/format'
 const EMPTY_CLIPS: Clip[] = []
 
 /**
- * Past searches — every prompt the user ran, the video it ran against, and
- * the clips that came back. Clips are stored as a snapshot at search time,
+ * Clips — every prompt the user ran, the video it ran against, and the
+ * clips that came back. Clips are stored as a snapshot at search time,
  * so replaying one shows exactly what was found. Expanding a search loads
  * its playback source and captures real thumbnails from the video.
  */
-export default function History() {
+export default function Clips() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const videos = useVideos(user?.id)
@@ -111,12 +111,12 @@ export default function History() {
 
   function onClearAll() {
     if (!user) return
-    if (confirm('Clear all search history?')) void clearHistory(user.id)
+    if (confirm('Clear all clips?')) void clearHistory(user.id)
   }
 
   return (
     <AppShell
-      title="Search history"
+      title="Clips"
       subtitle="Every search you've run, and the clips each one found."
       actions={
         records.length > 0 ? (
@@ -136,8 +136,8 @@ export default function History() {
         {records.length === 0 ? (
           <Panel>
             <EmptyState
-              icon={<HistoryIcon />}
-              title="No searches yet"
+              icon={<FilmIcon />}
+              title="No clips yet"
               body="Run a search on any indexed video and it will show up here, with the clips it found — ready to replay or re-run."
               action={
                 <Button
@@ -172,7 +172,7 @@ export default function History() {
                       >
                         <span className="flex items-start gap-2.5">
                           <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg border border-brand-line bg-brand-wash text-brand [&_svg]:size-3.5">
-                            <HistoryIcon />
+                            <FilmIcon />
                           </span>
                           <span className="min-w-0">
                             <b className="block truncate text-[14.5px] font-semibold text-ink">

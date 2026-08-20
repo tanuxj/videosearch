@@ -173,7 +173,7 @@ export default function Search() {
     setSearchError(result.error ?? null)
     setSearching(false)
 
-    // Remember the search for the History page — only when it actually ran.
+    // Remember the search for the Clips page — only when it actually ran.
     // The clips are a snapshot, so history replays the exact result shown.
     if (user && !result.error) {
       void saveSearchRecord(user.id, {
@@ -186,7 +186,7 @@ export default function Search() {
     }
   }
 
-  // A deep link from the History page ("Re-run this search") arrives as
+  // A deep link from the Clips page ("Re-run this search") arrives as
   // ?v=<video>&q=<prompt>: pick the video as usual, then run the search once
   // the video is ready. The ref guards against re-running on every render.
   const autoRanQueryRef = useRef<string | null>(null)

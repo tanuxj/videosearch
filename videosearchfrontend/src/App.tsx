@@ -8,7 +8,7 @@ import Home from './pages/Home'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
-import History from './pages/History'
+import Clips from './pages/Clips'
 import Search from './pages/Search'
 import Record from './pages/Record'
 import Recordings from './pages/Recordings'
@@ -21,7 +21,7 @@ const PROTECTED = new Set([
   '/dashboard',
   '/upload',
   '/search',
-  '/history',
+  '/clips',
   '/record',
   '/recordings',
   '/workspaces',
@@ -63,6 +63,8 @@ function Routes() {
     if (user && AUTH_ONLY.has(route)) navigate('/dashboard', true)
     // Upload is a dialog now — keep the old link working.
     if (user && route === '/upload') navigate('/search?upload=1', true)
+    // History was renamed to Clips — keep the old link working.
+    if (user && route === '/history') navigate('/clips', true)
   }, [ready, user, route, navigate])
 
   // Hold the first paint until the stored session is known — otherwise
@@ -87,8 +89,8 @@ function Routes() {
       return <Dashboard />
     case '/search':
       return <Search />
-    case '/history':
-      return <History />
+    case '/clips':
+      return <Clips />
     case '/record':
       return <Record />
     case '/recordings':
@@ -100,6 +102,7 @@ function Routes() {
     case '/privacy':
       return <Privacy />
     case '/upload':
+    case '/history':
       return null // redirected above
     default:
       return <NotFound />
