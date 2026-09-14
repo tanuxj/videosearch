@@ -1,5 +1,7 @@
 import { useEffect } from 'react'
 import { AuthProvider, useAuth } from './lib/auth'
+import { AUTH_ENABLED } from './lib/http'
+import { SINGLE_PAGE, SINGLE_PAGE_ROUTE } from './lib/features'
 import { Link, useNavigate, useRoute } from './lib/router'
 import { MarketingShell } from './components/Shell'
 import { ButtonLink } from './components/ui/Button'
@@ -27,6 +29,20 @@ const PROTECTED = new Set([
   '/workspaces',
 ])
 const AUTH_ONLY = new Set(['/login', '/signup'])
+
+/**
+ * Routes single-page mode folds away. They stay in the bundle and still work
+ * the moment `VITE_SINGLE_PAGE` is off — they just redirect to the one page
+ * while it is on, so a stale link or bookmark lands somewhere useful instead
+ * of on a screen with no way back.
+ */
+const FOLDED_AWAY = new Set([
+  '/dashboard',
+  '/clips',
+  '/record',
+  '/recordings',
+  '/workspaces',
+])
 
 function NotFound() {
   return (
@@ -57,21 +73,38 @@ function Routes() {
   const navigate = useNavigate()
   const { user, ready } = useAuth()
 
+  // Accounts off: the landing page and the two sign-in routes collapse onto
+  // the single upload-and-search page. `PROTECTED` never fires because there
+  // is always a user. Single-page mode folds the remaining workspace pages in
+  // the same way, so `/` is the search page under either switch.
+  const redirectToOnePage =
+    (!AUTH_ENABLED && (route === '/' || AUTH_ONLY.has(route))) ||
+    (SINGLE_PAGE && (route === '/' || FOLDED_AWAY.has(route)))
+
   useEffect(() => {
     if (!ready) return
+    if (redirectToOnePage) {
+      navigate(SINGLE_PAGE_ROUTE, true)
+      return
+    }
     if (!user && PROTECTED.has(route)) navigate('/login', true)
-    if (user && AUTH_ONLY.has(route)) navigate('/dashboard', true)
+    if (user && AUTH_ENABLED && AUTH_ONLY.has(route)) navigate('/dashboard', true)
     // Upload is a dialog now — keep the old link working.
     if (user && route === '/upload') navigate('/search?upload=1', true)
-    // History was renamed to Clips — keep the old link working.
-    if (user && route === '/history') navigate('/clips', true)
-  }, [ready, user, route, navigate])
+    // History was renamed to Clips — keep the old link working. In
+    // single-page mode Clips is folded away, so go straight to the one page
+    // rather than bouncing through a route that only redirects again.
+    if (user && route === '/history') {
+      navigate(SINGLE_PAGE ? SINGLE_PAGE_ROUTE : '/clips', true)
+    }
+  }, [ready, user, route, navigate, redirectToOnePage])
 
   // Hold the first paint until the stored session is known — otherwise
   // protected pages flash before the redirect lands.
   if (!ready) return null
+  if (redirectToOnePage) return null
   if (!user && PROTECTED.has(route)) return null
-  if (user && AUTH_ONLY.has(route)) return null
+  if (user && AUTH_ENABLED && AUTH_ONLY.has(route)) return null
 
   // Share pages are deliberately public — no session, no app shell.
   if (route.startsWith('/share/')) {
@@ -85,6 +118,7 @@ function Routes() {
       return <Login />
     case '/signup':
       return <Signup />
+    // Both redirected above when accounts are disabled.
     case '/dashboard':
       return <Dashboard />
     case '/search':

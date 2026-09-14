@@ -9,6 +9,7 @@ import {
   createVideosFromUrls,
   getVideo,
   readVideoDuration,
+  refreshVideos,
   saveVideo,
   streamSourceFor,
 } from '../lib/store'
@@ -16,6 +17,7 @@ import type { VideoRecord } from '../lib/store'
 import { addVideosToCollection, createCollection, useCollections } from '../lib/collections'
 import { isEditorRole, useWorkspaces } from '../lib/workspaces'
 import { API_ENABLED } from '../lib/http'
+import { SINGLE_PAGE } from '../lib/features'
 import { Modal } from './Modal'
 import { cn } from '../lib/cn'
 import { Alert, Spinner } from './AuthLayout'
@@ -65,30 +67,6 @@ const NEW_COLLECTION = '__new__'
  * exact byte count, so it gets a fixed slice and indexing gets the rest.
  */
 const UPLOAD_SHARE = 30
-
-/**
- * The three things that actually happen, in order.
- *
- * There used to be four — "extracting", "embedding" and "writing vectors" were
- * listed separately — but the backend does not work that way: it decodes,
- * embeds and inserts one 32-frame chunk at a time, so those phases interleave
- * from the first second to the last. Showing them as sequential steps meant the
- * UI had to guess which one was "current", and it guessed wrong. One honest
- * indexing step with a real frame count beats three invented ones.
- */
-const FILE_STAGES = [
-  { label: 'Uploading file' },
-  { label: 'Indexing frames (1 fps)' },
-  { label: 'Ready to search' },
-]
-
-// URL imports swap the first stage for the server-side download — the client
-// has no bytes to count, so it holds here until the first frames appear.
-const URL_STAGES = [
-  { label: 'Downloading video' },
-  { label: 'Indexing frames (1 fps)' },
-  { label: 'Ready to search' },
-]
 
 /** How long indexing may report no new frames before we call it stuck. */
 const STALL_LIMIT_MS = 120_000
@@ -207,7 +185,6 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
   // video — there are no client-side bytes to count, so the bar reads as an
   // indeterminate pulse instead of a fake percentage.
   const downloading = mode === 'url' && stage === 0 && !done
-  const stages = mode === 'url' ? URL_STAGES : FILE_STAGES
 
   /**
    * Indexing runs entirely on the server (FastAPI BackgroundTasks), so the
@@ -284,6 +261,12 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
     })
     if (!aliveRef.current) return
     setVideo(record) // server owns the record — nothing to persist locally
+    // Announce the new row so the page's `useVideos` mounts pick it up —
+    // otherwise the picker behind this dialog never learns the video exists
+    // until a manual refresh. The list now holds a `processing` video, which
+    // keeps its own settle-polling running until the index finishes, so the
+    // picker flips to "Indexed" on its own.
+    refreshVideos()
     if (collection) {
       // Best effort: the video is uploaded either way, and a filing failure
       // must not read as a failed import.
@@ -573,6 +556,9 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
             workspaceId,
           })
           update(index, { video: record, transfer: 1 })
+          // Same as the single upload: put the row on the page's radar so the
+          // library/picker poll it to `ready` without a refresh.
+          refreshVideos()
           if (targetCollection) {
             // Best effort: a video that uploaded fine must not be reported as
             // failed just because filing it away didn't stick.
@@ -745,6 +731,8 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
       done: !item.video,
     }))
     setBatch(items)
+    // Put every reserved row on the page's radar (see ingestServer).
+    refreshVideos()
 
     if (collection) {
       const ids = items.flatMap((item) => (item.video ? [item.video.id] : []))
@@ -958,7 +946,7 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
               as the collection picker below: this is the one moment the user
               has the whole batch in mind. Only editor workspaces are listed;
               a viewer can't upload anywhere but their own library. */}
-          {API_ENABLED && uploadWorkspaces.length > 0 && (
+          {API_ENABLED && !SINGLE_PAGE && uploadWorkspaces.length > 0 && (
             <div className="flex flex-col gap-2 rounded-xl border border-line bg-surface-soft p-3.5">
               <label
                 htmlFor="upload-workspace"
@@ -985,8 +973,11 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
 
           {/* Filing happens here because this is the one moment the user has
               the whole batch in mind — tagging forty videos afterwards is a
-              chore nobody does. */}
-          {API_ENABLED && (
+              chore nobody does. Hidden in single-page mode along with the
+              Library it files into: `collectionId` then stays empty and
+              `ensureCollection()` resolves to undefined, so an upload simply
+              goes unfiled. */}
+          {API_ENABLED && !SINGLE_PAGE && (
             <div className="flex flex-col gap-2 rounded-xl border border-line bg-surface-soft p-3.5">
               <label
                 htmlFor="upload-collection"
@@ -1173,48 +1164,26 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
               </p>
             )}
 
-            <div className="mt-4 flex flex-col gap-0.5">
-              {stages.map((item, index) => {
-                const complete = done || index < stage
-                const active = !done && index === stage
-                return (
-                  <div
-                    key={item.label}
-                    className={cn(
-                      'flex items-center gap-2.5 rounded-lg px-2 py-2 text-[13px] transition-colors',
-                      complete
-                        ? 'text-ink'
-                        : active
-                          ? 'bg-brand-wash font-medium text-brand'
-                          : 'text-ink-faint',
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        'grid size-[18px] shrink-0 place-items-center rounded-full border [&_svg]:size-3',
-                        complete
-                          ? 'border-ok bg-ok text-white'
-                          : active
-                            ? 'animate-pulse border-brand bg-brand-wash'
-                            : 'border-line-strong',
-                      )}
-                    >
-                      {complete && <CheckIcon />}
-                    </span>
-                    {item.label}
-                    {/* Live count on the indexing row: "1.2K / 9.3K frames"
-                        moves every second, which is the whole point — the old
-                        bare "0 frames" never changed until it was already done. */}
-                    {index === 1 && (active || complete) && (
-                      <span className="ml-auto font-mono text-[11.5px] text-ink-faint">
-                        {video.framesTotal > 0
-                          ? `${compactNumber(video.frames)} / ${framesLabel(video.framesTotal)}`
-                          : 'reading video…'}
-                      </span>
-                    )}
-                  </div>
-                )
-              })}
+            {/* One honest processing state: download + indexing interleave
+                server-side, so a multi-step list could only guess which was
+                "current" and guessed wrong. The card's progress bar carries
+                the real numbers; this row just says it's working. */}
+            <div
+              className={cn(
+                'mt-4 flex items-center gap-2.5 rounded-lg px-2 py-2 text-[13px]',
+                done
+                  ? 'text-ink'
+                  : 'bg-brand-wash font-medium text-brand',
+              )}
+            >
+              {done ? (
+                <span className="grid size-[18px] shrink-0 place-items-center rounded-full border border-ok bg-ok text-white [&_svg]:size-3">
+                  <CheckIcon />
+                </span>
+              ) : (
+                <Spinner className="size-[18px]" />
+              )}
+              {done ? 'Ready to search' : 'Processing…'}
             </div>
               </>
             ) : null}
@@ -1260,7 +1229,7 @@ export function UploadDialog({ open, onClose, onReady, initialWorkspaceId }: Pro
             ) : (
               <>
                 <Spinner />
-                Indexing…
+                Processing…
               </>
             )}
           </Button>

@@ -2,7 +2,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import (
+    EmailStr,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["development", "test", "production"]
@@ -38,14 +45,63 @@ class Settings(BaseSettings):
     # (CORS_ORIGINS=["http://a","http://b"]) or a comma-separated list.
     cors_origins: list[str] = Field(
         default_factory=lambda: [
-            "http://localhost:5174",
-            "http://127.0.0.1:5174",
+            "http://localhost:5180",
+            "http://127.0.0.1:5180",
         ]
     )
 
     log_level: str = "INFO"
 
     # ── Authentication ───────────────────────────────────────────
+    # Master switch. With `auth_enabled=False` the whole signup/login system
+    # is bypassed rather than removed: `/auth/signup`, `/auth/login` and
+    # `/auth/refresh` answer 404, and every authenticated dependency resolves
+    # to one shared guest account (see `app.auth.guest`) instead of a bearer
+    # token. The app then runs as an open platform — anyone who can reach it
+    # can upload a video or paste a URL, index it and search its scenes, and
+    # everyone sees the same shared library.
+    #
+    # Turning it back on needs no code change: set AUTH_ENABLED=true. The
+    # tables, routes and password hashing are all still here, and the videos
+    # indexed while it was off stay owned by the guest account.
+    auth_enabled: bool = True
+
+    # How open access hands out identities:
+    #
+    # "per_browser" (default) — every browser gets its own throwaway session,
+    #   the way a disposable-inbox site does. A visitor with no session cookie
+    #   is issued one, backed by its own account, so they see only the videos
+    #   they added. Clearing cookies, opening a private window or using
+    #   another browser starts a fresh, empty session.
+    #
+    # "shared" — one account for everybody, so every visitor sees and can
+    #   delete every video. Only sensible for a trusted single-user instance.
+    guest_session_mode: Literal["per_browser", "shared"] = "per_browser"
+
+    # Session cookie for "per_browser". Opaque, random and httpOnly: it is the
+    # only thing that ties a browser to its videos, so JavaScript must not be
+    # able to read it. Scoped to "/" (not just /auth) because it has to ride
+    # along on every video, thumbnail and caption request too.
+    guest_cookie_name: str = "vs_guest"
+    guest_cookie_ttl_days: int = Field(default=30, ge=1, le=365)
+    # As with the refresh cookie: "none" + secure=true is required when the
+    # API is served from a different site than the frontend.
+    guest_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    guest_cookie_secure: bool = False
+    guest_cookie_domain: str | None = None
+
+    # Identity of the account used while `auth_enabled` is False. In "shared"
+    # mode this is the single account everyone gets; in "per_browser" mode it
+    # is the display name each session's own account is created with, and the
+    # email is only the template the per-session addresses are built from.
+    #
+    # The email is never delivered to, but it is still serialised through the
+    # same `EmailStr` schema as a real account's, so it has to be a valid
+    # address — `.internal` keeps it obviously non-routable while parsing
+    # cleanly (`localhost` and `.local` are rejected as special-use names).
+    guest_user_name: str = "Guest"
+    guest_user_email: str = "guest@videosearch.internal"
+
     # Access tokens are short-lived JWTs held in memory by the client;
     # refresh tokens are opaque, stored hashed in Postgres and delivered
     # in an httpOnly cookie so JavaScript can never read them.
@@ -58,7 +114,7 @@ class Settings(BaseSettings):
     # Cookie is scoped to the auth routes — it is never sent to any other
     # endpoint, so a leak in an unrelated handler cannot expose it.
     refresh_cookie_path: str = "/api/v1/auth"
-    # Lax works across ports on the same site (localhost:5174 → :3006).
+    # Lax works across ports on the same site (localhost:5180 → :3006).
     # Deploying the API on a different registrable domain needs
     # "none" + secure=true.
     refresh_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
@@ -272,6 +328,30 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
+    @field_validator("guest_cookie_domain", "refresh_cookie_domain", mode="before")
+    @classmethod
+    def _blank_cookie_domain_is_host_only(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("guest_user_email")
+    @classmethod
+    def _validate_guest_email(cls, value: str) -> str:
+        """Reject a guest address `UserOut` would later fail to serialise.
+
+        Without this the app boots fine and then 500s on the first
+        `/auth/me` — much easier to diagnose here, at startup.
+        """
+        try:
+            return TypeAdapter(EmailStr).validate_python(value.strip().lower())
+        except ValidationError as exc:
+            raise ValueError(
+                f"GUEST_USER_EMAIL ({value!r}) is not a valid email address. "
+                "Note that `localhost` and `.local` are rejected as "
+                "special-use names — try e.g. guest@videosearch.internal."
+            ) from exc
+
     @model_validator(mode="after")
     def _reject_dev_secret_in_production(self) -> "Settings":
         if self.app_env == "production" and self.jwt_secret == DEV_JWT_SECRET:
@@ -292,6 +372,15 @@ class Settings(BaseSettings):
         if url.startswith("postgres://"):  # Heroku-style alias
             return url.replace("postgres://", "postgresql+asyncpg://", 1)
         return url
+
+    @property
+    def guest_sessions_enabled(self) -> bool:
+        """True when each browser should get its own throwaway account."""
+        return not self.auth_enabled and self.guest_session_mode == "per_browser"
+
+    @property
+    def guest_cookie_ttl_seconds(self) -> int:
+        return self.guest_cookie_ttl_days * 24 * 60 * 60
 
     @property
     def access_token_ttl_seconds(self) -> int:

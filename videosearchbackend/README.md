@@ -47,7 +47,7 @@ Settings are loaded from `.env` (see `.env.example`) via pydantic-settings in
 | `APP_DEBUG`     | `false`                                     | Debug mode                    |
 | `HOST`          | `127.0.0.1`                                 | Bind address (used by `videosearch-api`) |
 | `PORT`          | `3006`                                      | Bind port (used by `videosearch-api`)    |
-| `CORS_ORIGINS`  | `["http://localhost:5174","http://127.0.0.1:5174"]` | Browser origins allowed to call the API |
+| `CORS_ORIGINS`  | `["http://localhost:5180","http://127.0.0.1:5180"]` | Browser origins allowed to call the API |
 | `LOG_LEVEL`     | `INFO`                                      | Root log level                |
 | `DATABASE_URL`  | `postgresql://videosearch:videosearch@localhost:5432/videosearch` | Postgres connection string |
 | `POSTGRES_HOST` | `localhost`                                 | Postgres host (set to `db` inside docker-compose) |
@@ -155,7 +155,7 @@ are throttled/geo-blocked; Zoom recordings usually require login; live
 streams have no end point and can't be indexed. The backend needs outbound
 internet access.
 
-> `CORS_ORIGINS` already allows the Vite frontend (port 5174) — no extra setup
+> `CORS_ORIGINS` already allows the Vite frontend (port 5180) — no extra setup
 > needed to call this API from the browser.
 
 ## Search history

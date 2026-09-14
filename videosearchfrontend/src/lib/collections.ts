@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { API_ENABLED, apiFetch } from './http'
+import { SINGLE_PAGE } from './features'
 
 /**
  * Collections: user-made groupings of videos.
@@ -127,7 +128,9 @@ export function useCollections(): {
   const [loading, setLoading] = useState(API_ENABLED)
 
   const refresh = useCallback(() => {
-    if (!API_ENABLED) {
+    // Single-page mode has no Library to file into, so the list is not just
+    // hidden — it is never fetched, and every caller sees an empty one.
+    if (!API_ENABLED || SINGLE_PAGE) {
       setCollections([])
       setLoading(false)
       return

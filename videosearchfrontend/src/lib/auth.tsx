@@ -9,6 +9,7 @@ import {
 import type { ReactNode } from 'react'
 import {
   API_ENABLED,
+  AUTH_ENABLED,
   AUTH_EXPIRED_EVENT,
   ApiError,
   apiFetch,
@@ -29,6 +30,14 @@ import type { ApiUser, TokenPayload } from './http'
  * the UI stays walkable without a server. The fallback is opt-out only —
  * if an API is configured and unreachable, sign-in fails loudly rather than
  * silently pretending to succeed.
+ *
+ * With `VITE_AUTH_ENABLED=false` none of that happens: there is no account
+ * system. Each browser instead gets a throwaway session, the way a disposable
+ * inbox does — the backend issues an httpOnly `vs_guest` cookie on the first
+ * request and derives an account from it, so a visitor sees only the videos
+ * they added and a new browser starts empty. `GET /auth/me` is what tells the
+ * client which session it is in; the rest of the app reads `user` exactly as
+ * before, so upload, indexing, search and clips need no changes.
  */
 
 export type User = {
@@ -48,6 +57,30 @@ export function initials(name: string): string {
     .slice(0, 2)
     .map((part) => part[0]!.toUpperCase())
     .join('')
+}
+
+/* ── Open access (accounts disabled) ─────────────────────── */
+
+/**
+ * Stand-in identity for open access when the server cannot be asked who we
+ * are — no API configured (demo mode), or the API is unreachable.
+ *
+ * The id matches `GUEST_USER_ID` in the backend's `app/auth/guest.py`, which
+ * is the account its "shared" mode uses. Local storage keys are scoped by
+ * user id (`vs.videos.<id>`), so a real session's videos never mix with this
+ * fallback's.
+ */
+export const GUEST_USER: User = {
+  id: '00000000-0000-0000-0000-000000000001',
+  name: 'Guest',
+  email: 'guest@videosearch.internal',
+}
+
+/** Thrown if a sign-in form is somehow still reachable with accounts off. */
+function accountsDisabled(): Error {
+  return new Error(
+    'Accounts are disabled — no sign-in is needed. Upload a video and search it.',
+  )
 }
 
 /* ── Local demo fallback (no backend configured) ─────────── */
@@ -83,6 +116,12 @@ type AuthValue = {
   signUp: (name: string, email: string, password: string) => Promise<void>
   signIn: (email: string, password: string) => Promise<void>
   signOut: () => void
+  /**
+   * Open access only: abandon this browser's session and start an empty one.
+   * The previous session's videos are left on the server but become
+   * unreachable — the cookie was the only way back to them. Reloads the page.
+   */
+  resetSession: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthValue | null>(null)
@@ -97,6 +136,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let cancelled = false
 
     async function bootstrap() {
+      // Open access: the session cookie is httpOnly, so the only way to learn
+      // which session this browser is in is to ask. The request also *starts*
+      // the session when there is no cookie yet — the response sets one.
+      if (!AUTH_ENABLED) {
+        let identity = GUEST_USER
+        if (API_ENABLED) {
+          try {
+            identity = toUser(
+              await apiFetch<ApiUser>('/api/v1/auth/me', { auth: false }),
+            )
+          } catch {
+            // Unreachable API: fall back so the UI still renders rather than
+            // hanging on a blank screen. Storage keys stay separate.
+          }
+        }
+        if (!cancelled) {
+          setUser(identity)
+          setReady(true)
+        }
+        return
+      }
+
       if (API_ENABLED) {
         const payload = await refreshSession()
         if (!cancelled) setUser(payload ? toUser(payload.user) : null)
@@ -120,6 +181,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // A failed refresh means the refresh token is gone, expired or was
   // replayed — drop the user straight back to signed-out.
   useEffect(() => {
+    if (!AUTH_ENABLED) return
     const onExpired = () => setUser(null)
     window.addEventListener(AUTH_EXPIRED_EVENT, onExpired)
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired)
@@ -127,6 +189,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signUp = useCallback(
     async (name: string, email: string, password: string) => {
+      if (!AUTH_ENABLED) throw accountsDisabled()
+
       if (API_ENABLED) {
         const payload = await apiFetch<TokenPayload>('/api/v1/auth/signup', {
           method: 'POST',
@@ -158,6 +222,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 
   const signIn = useCallback(async (email: string, password: string) => {
+    if (!AUTH_ENABLED) throw accountsDisabled()
+
     if (API_ENABLED) {
       const payload = await apiFetch<TokenPayload>('/api/v1/auth/login', {
         method: 'POST',
@@ -180,6 +246,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const signOut = useCallback(() => {
+    // Nothing to sign out of with accounts off, and clearing `user` would
+    // strand the app on a login page that no longer exists.
+    if (!AUTH_ENABLED) return
+
     // Clear locally first so the UI never looks signed in while the
     // revocation request is still in flight.
     setUser(null)
@@ -196,9 +266,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const resetSession = useCallback(async () => {
+    if (AUTH_ENABLED) return
+
+    if (API_ENABLED) {
+      await apiFetch('/api/v1/auth/session/reset', {
+        method: 'POST',
+        auth: false,
+      })
+    } else {
+      // Demo mode keeps its library in localStorage under the fallback id.
+      localStorage.removeItem(`vs.videos.${GUEST_USER.id}`)
+      localStorage.removeItem(`vs.history.${GUEST_USER.id}`)
+    }
+
+    // Reload rather than re-fetching in place: the old session's video list,
+    // blob URLs, thumbnails and in-flight requests are all invalid now, and a
+    // reload is the one way to be sure none of them survive.
+    window.location.reload()
+  }, [])
+
   const value = useMemo<AuthValue>(
-    () => ({ user, ready, signUp, signIn, signOut }),
-    [user, ready, signUp, signIn, signOut],
+    () => ({ user, ready, signUp, signIn, signOut, resetSession }),
+    [user, ready, signUp, signIn, signOut, resetSession],
   )
 
   return <AuthContext value={value}>{children}</AuthContext>

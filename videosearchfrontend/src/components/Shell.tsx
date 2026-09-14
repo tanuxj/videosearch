@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link, useRoute } from '../lib/router'
 import { initials, useAuth } from '../lib/auth'
+import { AUTH_ENABLED } from '../lib/http'
+import { SINGLE_PAGE, SINGLE_PAGE_ROUTE } from '../lib/features'
 import { cn } from '../lib/cn'
 import { ButtonLink } from './ui/Button'
 import {
@@ -75,7 +77,7 @@ export function MarketingShell({ children }: { children: ReactNode }) {
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-2">
-            {user ? (
+            {user || !AUTH_ENABLED ? (
               <ButtonLink as={Link} to="/search" size="sm">
                 Open workspace
               </ButtonLink>
@@ -167,15 +169,105 @@ function NavLink({
   )
 }
 
+/**
+ * Single-page chrome: one header, no navigation.
+ *
+ * With `VITE_SINGLE_PAGE=true` there is nowhere else to go, so a sidebar of
+ * one item would be furniture. The brand moves into the header beside the
+ * page title, and the page's own actions (the search page's "Add video") plus
+ * the indexing bell keep their places on the right.
+ */
+/**
+ * "New session": the escape hatch for the throwaway-session model.
+ *
+ * Without it a browser is stuck with one library forever, since the session
+ * cookie is httpOnly and cannot be cleared from the page. Confirmed first —
+ * the current session's videos become unreachable, and there is no undo.
+ */
+function NewSessionButton() {
+  const { resetSession } = useAuth()
+  const [working, setWorking] = useState(false)
+
+  if (AUTH_ENABLED) return null
+
+  async function start() {
+    if (working) return
+    if (
+      !confirm(
+        'Start a new session? This browser gets an empty library, and the ' +
+          'videos in the current session will no longer be reachable.',
+      )
+    ) {
+      return
+    }
+    setWorking(true)
+    try {
+      await resetSession()
+    } catch {
+      // resetSession reloads on success, so reaching here means it failed.
+      setWorking(false)
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void start()}
+      disabled={working}
+      title="Clear this browser's library and start over"
+      className="rounded-lg border border-line px-3 py-2 text-[13px] text-ink-dim transition-colors hover:bg-surface-soft hover:text-ink disabled:opacity-60"
+    >
+      {working ? 'Starting…' : 'New session'}
+    </button>
+  )
+}
+
+function SinglePageShell({ title, subtitle, actions, children }: AppShellProps) {
+  return (
+    <div className="flex min-h-screen flex-col bg-surface">
+      <header className="sticky top-0 z-40 flex flex-wrap items-center gap-x-5 gap-y-3 border-b border-line bg-surface px-6 py-3.5">
+        <Brand to={SINGLE_PAGE_ROUTE} />
+
+        <div className="hidden h-7 w-px bg-line sm:block" />
+
+        <div className="min-w-0">
+          <h1 className="text-[17px] leading-tight font-semibold tracking-[-0.02em] text-ink">
+            {title}
+          </h1>
+          {subtitle && (
+            <p className="mt-0.5 text-[12.5px] text-ink-dim">{subtitle}</p>
+          )}
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          <NewSessionButton />
+          <NotificationBell />
+          {actions && <div className="flex items-center gap-2">{actions}</div>}
+        </div>
+      </header>
+
+      <div className="min-w-0 flex-1 px-6 py-6">{children}</div>
+    </div>
+  )
+}
+
 export function AppShell({ title, subtitle, actions, children }: AppShellProps) {
   const route = useRoute()
   const { user, signOut } = useAuth()
+
+  if (SINGLE_PAGE) {
+    return (
+      <SinglePageShell title={title} subtitle={subtitle} actions={actions}>
+        {children}
+      </SinglePageShell>
+    )
+  }
 
   return (
     <div className="flex min-h-screen bg-surface">
       <aside className="sticky top-0 hidden h-screen w-[240px] shrink-0 flex-col border-r border-line bg-surface md:flex">
         <div className="flex h-16 items-center px-4">
-          <Brand to="/dashboard" />
+          <Brand to={AUTH_ENABLED ? '/dashboard' : '/search'} />
         </div>
 
         <nav className="flex flex-col gap-0.5 px-2">
@@ -216,19 +308,21 @@ export function AppShell({ title, subtitle, actions, children }: AppShellProps) 
                   {user.name}
                 </b>
                 <span className="block truncate text-[11.5px] text-ink-faint">
-                  Free
+                  {AUTH_ENABLED ? 'Free' : 'Open access'}
                 </span>
               </div>
             </div>
           )}
-          <button
-            type="button"
-            onClick={signOut}
-            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-ink-dim transition-colors hover:bg-surface-soft hover:text-ink [&_svg]:size-4"
-          >
-            <SignOutIcon />
-            Sign out
-          </button>
+          {AUTH_ENABLED && (
+            <button
+              type="button"
+              onClick={signOut}
+              className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-ink-dim transition-colors hover:bg-surface-soft hover:text-ink [&_svg]:size-4"
+            >
+              <SignOutIcon />
+              Sign out
+            </button>
+          )}
         </div>
       </aside>
 

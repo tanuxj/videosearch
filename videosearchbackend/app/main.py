@@ -97,10 +97,13 @@ app.include_router(search.router, prefix=settings.api_v1_prefix, tags=["search"]
 
 @app.get("/", include_in_schema=False)
 def root() -> dict[str, str]:
-    return {
+    links = {
         "name": settings.app_name,
         "docs": "/docs",
         "health": f"{settings.api_v1_prefix}/health",
-        "auth": f"{settings.api_v1_prefix}/auth/login",
         "search": f"{settings.api_v1_prefix}/search?q=typescript",
     }
+    # Pointing at /auth/login would be a dead link in open-access mode.
+    if settings.auth_enabled:
+        links["auth"] = f"{settings.api_v1_prefix}/auth/login"
+    return links

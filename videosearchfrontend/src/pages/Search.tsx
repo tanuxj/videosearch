@@ -12,6 +12,7 @@ import {
 } from '../lib/store'
 import type { VideoRecord } from '../lib/store'
 import { API_ENABLED } from '../lib/http'
+import { SINGLE_PAGE } from '../lib/features'
 import { SUGGESTIONS, searchClips } from '../lib/api'
 import type { Clip, TranscriptSegment } from '../lib/api'
 import { AppShell } from '../components/Shell'
@@ -534,7 +535,11 @@ export default function Search() {
                   </Card>
               ))}
             </div>
-          ) : videos.length > 0 ? (
+          ) : videos.length > 0 && !SINGLE_PAGE ? (
+            // Only audio-only recordings in the library: there is nothing to
+            // scene-search, so point at the page that can play them. Hidden in
+            // single-page mode, where that page is folded away — the "add a
+            // video" branch below is the useful thing to offer instead.
             <div className="flex justify-center">
               <Button
                 variant="secondary"
@@ -554,7 +559,10 @@ export default function Search() {
                 className="[&_svg]:size-[18px]"
               >
                 <UploadIcon />
-                Add your first video
+                {/* "First" is wrong once the library holds something the
+                    search cannot use — audio-only recordings in single-page
+                    mode reach this branch too. */}
+                {videos.length > 0 ? 'Add a video' : 'Add your first video'}
               </Button>
             </div>
           )}

@@ -17,7 +17,7 @@ const RAW_API_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
  * Same-origin mode: call the API through the page's own origin.
  *
  * This exists because the refresh cookie is host-only with `SameSite=Lax`. Point
- * the browser at `localhost:5174` while the API is addressed as
+ * the browser at `localhost:5180` while the API is addressed as
  * `127.0.0.1:3006` and those are *different sites*, so the browser refuses to
  * attach the cookie to the `POST /auth/refresh` — Lax allows top-level
  * navigations only. Refresh then 401s and the session dies the moment the
@@ -34,6 +34,19 @@ const API_URL = SAME_ORIGIN ? '' : RAW_API_URL
 
 /** False when no backend is configured — the app then runs on local demo auth. */
 export const API_ENABLED = SAME_ORIGIN || Boolean(RAW_API_URL)
+
+/**
+ * Open-access mode: `VITE_AUTH_ENABLED=false` turns the account system off.
+ *
+ * There is then no sign-up, no sign-in and no token to carry — the backend
+ * (which must have `AUTH_ENABLED=false` to match) serves every request as one
+ * shared guest account. Everything below that deals with access tokens,
+ * refreshing and expiry simply never runs, so a request is a plain `fetch`.
+ *
+ * Nothing here is deleted: flip this back to true, restart the dev server,
+ * and the full token flow is live again.
+ */
+export const AUTH_ENABLED = import.meta.env.VITE_AUTH_ENABLED !== 'false'
 
 export type ApiUser = {
   id: string
@@ -108,7 +121,9 @@ export function setSession(payload: TokenPayload | null): void {
  * await the same request; a failure clears the session and notifies the app.
  */
 export function refreshSession(): Promise<TokenPayload | null> {
-  if (!API_ENABLED) return Promise.resolve(null)
+  // No cookie to exchange in open-access mode, and `/auth/refresh` answers
+  // 404 there — so never ask.
+  if (!API_ENABLED || !AUTH_ENABLED) return Promise.resolve(null)
 
   refreshInFlight ??= fetch(url('/api/v1/auth/refresh'), {
     method: 'POST',
@@ -151,7 +166,9 @@ export async function apiFetch<T>(path: string, options: FetchOptions = {}): Pro
   let response = await send(accessToken)
 
   // Expired access token: refresh once, then replay the original request.
-  if (response.status === 401 && auth) {
+  // With accounts off a 401 cannot be an expiry, so it falls through to the
+  // error below rather than tearing down a session that does not exist.
+  if (response.status === 401 && auth && AUTH_ENABLED) {
     const refreshed = await refreshSession()
     if (refreshed) {
       response = await send(refreshed.access_token)

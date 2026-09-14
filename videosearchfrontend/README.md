@@ -1,12 +1,12 @@
 # VideoSearch — frontend
 
-A React + TypeScript video search frontend built with Vite. Runs on **port 5174**.
+A React + TypeScript video search frontend built with Vite. Runs on **port 5180**.
 
 ## Quick start
 
 ```bash
 npm install
-npm run dev        # → http://localhost:5174
+npm run dev        # → http://localhost:5180
 ```
 
 ## Environment
@@ -26,7 +26,7 @@ Copy `.env.example` to `.env` and fill in your values:
 ## Scripts
 
 ```bash
-npm run dev      # dev server on http://localhost:5174 (strict port)
+npm run dev      # dev server on http://localhost:5180 (strict port)
 npm run build    # typecheck (tsc -b) + production build to dist/
 npm run lint     # oxlint
 npm run preview  # preview the production build

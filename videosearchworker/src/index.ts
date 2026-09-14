@@ -34,7 +34,7 @@ function allowedOrigins(env: Env): Set<string> {
   if (env.ALLOWED_ORIGINS) {
     return new Set(env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean))
   }
-  return new Set(['http://localhost:5174', 'http://127.0.0.1:5174'])
+  return new Set(['http://localhost:5180', 'http://127.0.0.1:5180'])
 }
 
 const ROUTE_PREFIX = '/stream/'

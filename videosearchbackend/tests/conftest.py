@@ -31,6 +31,11 @@ os.environ.setdefault("INDEX_ON_UPLOAD", "false")
 # Startup would otherwise preload the real CLIP weights (~1.2 GB) as soon as a
 # TestClient enters the app's lifespan.
 os.environ.setdefault("PREWARM_CLIP_MODEL", "false")
+# The suite asserts the real signup/login/token behaviour, so it must not
+# inherit AUTH_ENABLED=false from a deployment's .env — a developer running an
+# open-access instance locally would otherwise see every auth test fail.
+# Tests that want the open-access path set it themselves.
+os.environ.setdefault("AUTH_ENABLED", "true")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

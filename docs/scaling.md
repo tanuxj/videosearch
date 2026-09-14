@@ -11,7 +11,7 @@
 ## 0. Where we are today
 
 ```
-Browser (React/Vite, :5174)
+Browser (React/Vite, :5180)
    │  VITE_API_URL=http://127.0.0.1:3006
    ▼
 FastAPI + uvicorn (:3006)  ──── the ONE machine
