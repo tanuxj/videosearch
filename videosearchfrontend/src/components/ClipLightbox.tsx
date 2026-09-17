@@ -14,6 +14,7 @@ import {
   CloseIcon,
   DownloadIcon,
   FilmIcon,
+  LockIcon,
 } from './Icons'
 import { timecode, timecodeExact } from '../lib/format'
 
@@ -57,6 +58,15 @@ type Props = {
   prompt: string
   onSelect: (clip: Clip) => void
   onClose: () => void
+  /**
+   * Trial mode: playback stays open (it is the demo), but download and share
+   * are replaced by a signup CTA — the server answers 401 for a trial session
+   * anyway, so the buttons would just fail. The lock banner states the line
+   * between the demo and the product in place of dead controls.
+   */
+  locked?: boolean
+  /** Shown when a gated control is clicked in locked mode. */
+  onLockedAction?: () => void
 }
 
 export function ClipLightbox({
@@ -67,6 +77,8 @@ export function ClipLightbox({
   prompt,
   onSelect,
   onClose,
+  locked = false,
+  onLockedAction,
 }: Props) {
   const playerRef = useRef<HTMLVideoElement>(null)
   const [downloading, setDownloading] = useState(false)
@@ -269,21 +281,34 @@ export function ClipLightbox({
               {Math.round((clip.score / Math.max(topScore, 0.001)) * 100)}% match
             </span>
 
-            {API_ENABLED && (
+            {locked ? (
               <Button
                 variant="secondary"
                 size="sm"
-                disabled={downloading || !video}
-                onClick={() => void onDownload()}
-                title="Download this exact clip (start–end)"
+                onClick={onLockedAction}
+                title="Downloading clips needs an account"
                 className="[&_svg]:size-4"
               >
-                <DownloadIcon />
-                {downloading ? 'Preparing…' : 'Download clip'}
+                <LockIcon />
+                Download clip
               </Button>
+            ) : (
+              API_ENABLED && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={downloading || !video}
+                  onClick={() => void onDownload()}
+                  title="Download this exact clip (start–end)"
+                  className="[&_svg]:size-4"
+                >
+                  <DownloadIcon />
+                  {downloading ? 'Preparing…' : 'Download clip'}
+                </Button>
+              )
             )}
 
-            {API_ENABLED && video && (
+            {!locked && API_ENABLED && video && (
               <ShareButton
                 videoId={video.id}
                 suffix={`?t=${timecodeExact(currentTime)}`}

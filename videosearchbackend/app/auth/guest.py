@@ -1,8 +1,9 @@
-"""Identities for open access, when there are no accounts to sign in to.
+"""Identities for open access and the homepage trial, when there is no
+account session to act as.
 
-Two shapes, chosen by `GUEST_SESSION_MODE`:
+Three shapes, chosen by settings:
 
-**per_browser** (default) — a throwaway session per browser, like a
+**auth off + per_browser** — a throwaway session per browser, like a
 disposable-inbox site. A visitor arrives with no `vs_guest` cookie, so one is
 minted: 32 random bytes, httpOnly, and the only thing tying that browser to
 its videos. The account behind it is *derived* from the token rather than
@@ -10,8 +11,19 @@ looked up in a session table — see `user_id_for_token` — which keeps the who
 feature to one table and no migration. Clearing cookies, opening a private
 window or switching browsers starts a fresh, empty session.
 
-**shared** — one account for everybody, so every visitor sees the same
-library. Simpler, but there is no privacy between visitors at all.
+**auth off + shared** — one account for everybody, so every visitor sees the
+same library. Simpler, but there is no privacy between visitors at all.
+
+**auth on + trial** (the homepage demo) — the same per-browser session
+mechanism, but only for visitors the *public* pages let in: a trial session
+may upload and search, while product features (clip download, share links,
+search history) stay registered-only — enforced by the gated dependency in
+`app.auth.deps`, not by the routes. Every video a trial session creates is
+stamped `expires_at = now + TRIAL_TTL_MINUTES` by `apply_trial_expiry`, and
+the purge job (``app.videos.trial``) deletes expired ones along with their
+files. A visitor who signs up mid-session lands in their new account; the
+cookie is still replaced because the next `get_current_user` runs with a
+bearer token instead.
 
 Either way each request still resolves to a real `User` row, because ownership
 is what the videos, clips, history and collections tables are keyed on. No
@@ -22,6 +34,7 @@ import hashlib
 import logging
 import secrets
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Request, Response
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -153,6 +166,54 @@ async def resolve_guest_user(
         name=settings.guest_user_name,
         email=_session_email(user_id, settings),
     )
+
+
+async def resolve_trial_user(
+    db: AsyncSession,
+    request: Request,
+    response: Response,
+) -> User:
+    """Return the account for this request in homepage-trial mode.
+
+    Same per-browser mechanics as `resolve_guest_user` — derive the account
+    from the session cookie so there is no session table — but the caller
+    (`app.auth.deps`) only reaches here when the request carried no access
+    token and `trial_sessions_enabled` is on. Trial sessions are prevented
+    from logging in by construction: their password hash is `UNUSABLE_PASSWORD_HASH`,
+    so `verify_password` can only return False.
+    """
+    settings = get_settings()
+
+    token = request.cookies.get(settings.guest_cookie_name)
+    if not looks_like_token(token):
+        token = new_session_token()
+    assert token is not None  # narrowed by looks_like_token / the mint above
+
+    set_session_cookie(response, token, settings)
+
+    user_id = user_id_for_token(token)
+    return await _get_or_create(
+        db,
+        user_id=user_id,
+        name=settings.guest_user_name,
+        email=_session_email(user_id, settings),
+    )
+
+
+def apply_trial_expiry(video, settings: Settings, *, trial: bool) -> None:
+    """Stamp a trial upload with its deletion deadline, if it really is one.
+
+    Called at video-creation time with `trial=True` only when the request
+    acted as an anonymous trial session (`access.is_registered is False` in
+    the route layer) — the service never infers it from settings alone, or
+    a registered account's upload would silently become temporary too.
+    No-op for registered uploads and when trials are off: those videos have
+    no deadline and hold until their owner deletes them.
+    """
+    if not trial or not settings.trial_sessions_enabled:
+        return
+    video.expires_at = datetime.now(UTC) + timedelta(minutes=settings.trial_ttl_minutes)
+
 
 
 async def _get_or_create(

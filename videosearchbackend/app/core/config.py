@@ -102,6 +102,31 @@ class Settings(BaseSettings):
     guest_user_name: str = "Guest"
     guest_user_email: str = "guest@videosearch.internal"
 
+    # ── Homepage trial (anonymous demo) ──────────────────────────
+    # With `auth_enabled` on, the guest identity system above also powers the
+    # public homepage's try-it demo: a visitor with no account gets a
+    # throwaway *trial* session (same `vs_guest` cookie, derived account) so
+    # they can upload a video and search it without signing up. Everything a
+    # trial session produces is temporary — see `trial_ttl_minutes` — and the
+    # product features (clip download, share links, search history) stay
+    # registered-only, which is the line between the demo and the product.
+    #
+    # Set TRIAL_ENABLED=false to make every unauthenticated request 401 as
+    # before. While `auth_enabled` is off the whole app is open access
+    # anyway, so the trial distinction does not apply.
+    trial_enabled: bool = True
+    # How long a trial session's videos live. The signup page and the homepage
+    # both state this to the visitor; the purge job (app/videos/trial.py)
+    # enforces it server-side. One trial per browser: signing in or signing
+    # up keeps the account's videos, and the trial session's leftovers expire
+    # on their own clock.
+    trial_ttl_minutes: int = Field(default=30, ge=1, le=60 * 24 * 7)
+    # How often the background purge looks for expired trial videos. The TTL
+    # is a promise measured in tens of minutes, so a minute-grained sweep is
+    # plenty — and it must not be so aggressive that it competes with
+    # indexing work on a small instance.
+    trial_purge_interval_seconds: int = Field(default=60, ge=10)
+
     # Access tokens are short-lived JWTs held in memory by the client;
     # refresh tokens are opaque, stored hashed in Postgres and delivered
     # in an httpOnly cookie so JavaScript can never read them.
@@ -377,6 +402,21 @@ class Settings(BaseSettings):
     def guest_sessions_enabled(self) -> bool:
         """True when each browser should get its own throwaway account."""
         return not self.auth_enabled and self.guest_session_mode == "per_browser"
+
+    @property
+    def trial_sessions_enabled(self) -> bool:
+        """True when the homepage's anonymous trial is live.
+
+        Requires accounts to be on: with `auth_enabled=False` the whole app
+        is open access already, so there is no demo/full distinction to
+        draw. `RequestUser` (app.auth.deps) reads this to decide whether an
+        unauthenticated visitor is a trial session or a 401.
+        """
+        return self.auth_enabled and self.trial_enabled
+
+    @property
+    def trial_ttl_seconds(self) -> int:
+        return self.trial_ttl_minutes * 60
 
     @property
     def guest_cookie_ttl_seconds(self) -> int:

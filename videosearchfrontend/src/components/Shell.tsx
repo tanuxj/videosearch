@@ -36,10 +36,12 @@ export function Brand({ to = '/' }: { to?: string }) {
 
 /* ── Public / marketing pages ───────────────────────────── */
 
+// Router links rather than in-page anchors: the homepage is the demo itself
+// now, so the public nav is the two pages that exist — plus the auth pair on
+// the right.
 const MARKETING_LINKS = [
-  { href: '#how', label: 'How it works' },
-  { href: '#features', label: 'Features' },
-  { href: '#pricing', label: 'Pricing' },
+  { to: '/', label: 'Video Search' },
+  { to: '/pricing', label: 'Pricing' },
 ]
 
 export function MarketingShell({ children }: { children: ReactNode }) {
@@ -67,13 +69,13 @@ export function MarketingShell({ children }: { children: ReactNode }) {
           <Brand />
           <nav className="ml-2 hidden items-center gap-1 md:flex">
             {MARKETING_LINKS.map((link) => (
-              <a
-                key={link.href}
-                href={link.href}
+              <Link
+                key={link.to}
+                to={link.to}
                 className="rounded-full px-3 py-1.5 text-[13.5px] text-ink-mid transition-colors hover:bg-surface-sunk hover:text-ink"
               >
                 {link.label}
-              </a>
+              </Link>
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-2">
@@ -84,10 +86,10 @@ export function MarketingShell({ children }: { children: ReactNode }) {
             ) : (
               <>
                 <ButtonLink as={Link} to="/login" variant="ghost" size="sm">
-                  Sign in
+                  Log in
                 </ButtonLink>
                 <ButtonLink as={Link} to="/signup" size="sm">
-                  Get started
+                  Sign up
                 </ButtonLink>
               </>
             )}
@@ -103,6 +105,12 @@ export function MarketingShell({ children }: { children: ReactNode }) {
             © {new Date().getFullYear()} {APP_NAME}
           </span>
           <nav className="flex items-center gap-5">
+            <Link
+              to="/pricing"
+              className="text-[12.5px] text-ink-faint transition-colors hover:text-ink"
+            >
+              Pricing
+            </Link>
             <Link
               to="/privacy"
               className="text-[12.5px] text-ink-faint transition-colors hover:text-ink"

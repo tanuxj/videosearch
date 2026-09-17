@@ -31,7 +31,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from app.auth.deps import CurrentUser, DbSession
+from app.auth.deps import DbSession, RegisteredUser, RequestUserDep
 from app.auth.schemas import MessageResponse
 from app.collections import service as collections_service
 from app.core.config import get_settings
@@ -136,7 +136,7 @@ router = APIRouter(prefix="/videos", tags=["videos"])
     },
 )
 async def upload_video(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     background_tasks: BackgroundTasks,
     file: Annotated[
@@ -156,13 +156,14 @@ async def upload_video(
     try:
         video, staged_path = await videos_service.create_video(
             db,
-            owner_id=user.id,
+            owner_id=access.user.id,
             filename=filename,
             size_bytes=file.size or 0,
             content_type=file.content_type,
             source=source,
             workspace_id=workspace_id,
             file=file.file,
+            trial=not access.is_registered,
         )
     except videos_service.UnsupportedFileType as exc:
         raise HTTPException(
@@ -204,7 +205,7 @@ async def upload_video(
     },
 )
 async def move_video(
-    user: CurrentUser,
+    access: RegisteredUser,
     db: DbSession,
     video_id: uuid.UUID,
     payload: VideoMoveIn,
@@ -212,7 +213,7 @@ async def move_video(
     try:
         video = await videos_service.move_video(
             db,
-            user.id,
+            access.user.id,
             video_id,
             workspace_id=payload.workspace_id,
         )
@@ -244,7 +245,7 @@ async def move_video(
     },
 )
 async def import_from_url(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     background_tasks: BackgroundTasks,
     payload: UrlImportIn,
@@ -279,12 +280,13 @@ async def import_from_url(
     try:
         video = await videos_service.create_url_video(
             db,
-            owner_id=user.id,
+            owner_id=access.user.id,
             title=info["title"],
             ext=info["ext"],
             size_bytes=info.get("size") or 0,
             duration_seconds=info.get("duration") or 0.0,
             workspace_id=payload.workspace_id,
+            trial=not access.is_registered,
         )
     except videos_service.VideoForbidden as exc:
         raise _workspace_forbidden() from exc
@@ -321,7 +323,7 @@ async def import_from_url(
     },
 )
 async def import_from_urls(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     background_tasks: BackgroundTasks,
     payload: UrlImportBatchIn,
@@ -433,12 +435,13 @@ async def import_from_urls(
         try:
             video = await videos_service.create_url_video(
                 db,
-                owner_id=user.id,
+                owner_id=access.user.id,
                 size_bytes=outcome.get("size") or 0,
                 duration_seconds=outcome.get("duration") or 0.0,
                 title=outcome["title"],
                 ext=outcome["ext"],
                 workspace_id=payload.workspace_id,
+                trial=not access.is_registered,
             )
         except videos_service.VideoForbidden:
             items.append(
@@ -487,7 +490,7 @@ async def import_from_urls(
     },
 )
 async def presign_upload(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     payload: PresignUploadIn,
 ) -> PresignUploadOut:
@@ -517,11 +520,12 @@ async def presign_upload(
 
     video = await videos_service.create_pending_video(
         db,
-        owner_id=user.id,
+        owner_id=access.user.id,
         filename=payload.filename,
         size_bytes=payload.size_bytes,
         source=payload.source,
         workspace_id=payload.workspace_id,
+        trial=not access.is_registered,
     )
 
     upload_url = await run_in_threadpool(
@@ -557,7 +561,7 @@ async def presign_upload(
     },
 )
 async def presign_multipart_upload(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     payload: PresignUploadIn,
 ) -> PresignMultipartOut:
@@ -585,11 +589,12 @@ async def presign_multipart_upload(
 
     video = await videos_service.create_pending_video(
         db,
-        owner_id=user.id,
+        owner_id=access.user.id,
         filename=payload.filename,
         size_bytes=payload.size_bytes,
         source=payload.source,
         workspace_id=payload.workspace_id,
+        trial=not access.is_registered,
     )
 
     # Open the multipart upload and mint one URL per chunk. Any failure here
@@ -629,7 +634,7 @@ async def presign_multipart_upload(
     except Exception:
         if upload_id is not None:
             await run_in_threadpool(storage.abort_multipart, video.storage_key, upload_id)
-        await videos_service.delete_video(db, user.id, video.id)
+        await videos_service.delete_video(db, access.user.id, video.id)
         raise
 
 
@@ -645,13 +650,13 @@ async def presign_multipart_upload(
     responses={404: {"description": "Video not found"}},
 )
 async def complete_upload(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     background_tasks: BackgroundTasks,
     video_id: uuid.UUID,
 ) -> CompleteUploadOut:
     try:
-        video = await videos_service.get_video(db, user.id, video_id)
+        video = await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
@@ -660,7 +665,7 @@ async def complete_upload(
     try:
         await videos_service.complete_pending_video(
             db,
-            owner_id=user.id,
+            owner_id=access.user.id,
             video_id=video_id,
             expected_bytes=video.size_bytes,
         )
@@ -703,14 +708,14 @@ async def complete_upload(
     responses={404: {"description": "Video not found"}},
 )
 async def complete_multipart_video(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     background_tasks: BackgroundTasks,
     video_id: uuid.UUID,
     payload: CompleteMultipartIn,
 ) -> CompleteUploadOut:
     try:
-        video = await videos_service.get_video(db, user.id, video_id)
+        video = await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
@@ -733,7 +738,7 @@ async def complete_multipart_video(
     try:
         await videos_service.complete_pending_video(
             db,
-            owner_id=user.id,
+            owner_id=access.user.id,
             video_id=video_id,
             expected_bytes=video.size_bytes,
         )
@@ -769,7 +774,7 @@ async def complete_multipart_video(
     ),
 )
 async def list_videos(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     collection_id: Annotated[
         uuid.UUID | None,
@@ -781,7 +786,7 @@ async def list_videos(
     ] = None,
 ) -> VideoListOut:
     videos = await videos_service.list_videos(
-        db, user.id, collection_id=collection_id, workspace_id=workspace_id
+        db, access.user.id, collection_id=collection_id, workspace_id=workspace_id
     )
     # One query for the whole page rather than one per card.
     memberships = await collections_service.collection_ids_for(db, [video.id for video in videos])
@@ -800,9 +805,9 @@ async def list_videos(
     summary="Video status and metadata",
     responses={404: {"description": "Video not found"}},
 )
-async def get_video(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> VideoOut:
+async def get_video(access: RequestUserDep, db: DbSession, video_id: uuid.UUID) -> VideoOut:
     try:
-        video = await videos_service.get_video(db, user.id, video_id)
+        video = await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
     return VideoOut.model_validate(video)
@@ -819,9 +824,9 @@ async def get_video(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> Vi
     ),
     responses={404: {"description": "Video not found"}},
 )
-async def stream_url(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> StreamUrlOut:
+async def stream_url(access: RequestUserDep, db: DbSession, video_id: uuid.UUID) -> StreamUrlOut:
     try:
-        video = await videos_service.get_video(db, user.id, video_id)
+        video = await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
@@ -847,14 +852,14 @@ async def stream_url(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> S
     responses={404: {"description": "Video not found"}},
 )
 async def get_share_link(
-    user: CurrentUser,
+    access: RegisteredUser,
     db: DbSession,
     video_id: uuid.UUID,
 ) -> ShareLinkOut:
     try:
         token = await videos_service.get_or_create_share_token(
             db,
-            owner_id=user.id,
+            owner_id=access.user.id,
             video_id=video_id,
         )
     except videos_service.VideoNotFound as exc:
@@ -873,12 +878,12 @@ async def get_share_link(
     responses={404: {"description": "Video not found"}},
 )
 async def revoke_share_link(
-    user: CurrentUser,
+    access: RegisteredUser,
     db: DbSession,
     video_id: uuid.UUID,
 ) -> MessageResponse:
     try:
-        await videos_service.unshare_video(db, owner_id=user.id, video_id=video_id)
+        await videos_service.unshare_video(db, owner_id=access.user.id, video_id=video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
     return MessageResponse(detail="Share link revoked")
@@ -897,13 +902,13 @@ async def revoke_share_link(
     responses={404: {"description": "Video not found"}},
 )
 async def stream_video(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     request: Request,
     video_id: uuid.UUID,
 ):
     try:
-        video = await videos_service.get_video(db, user.id, video_id)
+        video = await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
@@ -925,9 +930,11 @@ async def stream_video(
     ),
     responses={404: {"description": "Video not found"}},
 )
-async def get_transcript(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> TranscriptOut:
+async def get_transcript(
+    access: RequestUserDep, db: DbSession, video_id: uuid.UUID
+) -> TranscriptOut:
     try:
-        video = await videos_service.get_video(db, user.id, video_id)
+        video = await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
@@ -963,13 +970,13 @@ async def get_transcript(user: CurrentUser, db: DbSession, video_id: uuid.UUID) 
     },
 )
 async def start_transcription(
-    user: CurrentUser,
+    access: RegisteredUser,
     db: DbSession,
     background_tasks: BackgroundTasks,
     video_id: uuid.UUID,
 ) -> VideoOut:
     try:
-        video = await videos_service.get_video(db, user.id, video_id)
+        video = await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
@@ -1008,9 +1015,11 @@ async def start_transcription(
     ),
     responses={404: {"description": "Video not found"}},
 )
-async def get_captions(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> PlainTextResponse:
+async def get_captions(
+    access: RequestUserDep, db: DbSession, video_id: uuid.UUID
+) -> PlainTextResponse:
     try:
-        await videos_service.get_video(db, user.id, video_id)
+        await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
@@ -1041,14 +1050,14 @@ async def get_captions(user: CurrentUser, db: DbSession, video_id: uuid.UUID) ->
     },
 )
 async def download_clip(
-    user: CurrentUser,
+    access: RegisteredUser,
     db: DbSession,
     video_id: uuid.UUID,
     start: float = Query(ge=0, description="Clip start, in seconds"),
     end: float = Query(gt=0, description="Clip end, in seconds"),
 ):
     try:
-        video = await videos_service.get_video(db, user.id, video_id)
+        video = await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
@@ -1126,16 +1135,16 @@ async def download_clip(
     responses={404: {"description": "Video not found"}},
 )
 async def list_saved_clips(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     video_id: uuid.UUID,
 ) -> SavedClipListOut:
     try:
-        await videos_service.get_video(db, user.id, video_id)
+        await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
-    items = await saved_clips.list_clips(db, user.id, video_id)
+    items = await saved_clips.list_clips(db, access.user.id, video_id)
     return SavedClipListOut(items=items, count=len(items))
 
 
@@ -1147,7 +1156,7 @@ async def list_saved_clips(
     responses={404: {"description": "Video or clip not found"}},
 )
 async def delete_saved_clip(
-    user: CurrentUser,
+    access: RegisteredUser,
     db: DbSession,
     video_id: uuid.UUID,
     clip_id: uuid.UUID,
@@ -1155,11 +1164,11 @@ async def delete_saved_clip(
     # The video must exist and belong to the user before touching its clips —
     # otherwise the clip id alone could reveal another user's data.
     try:
-        await videos_service.get_video(db, user.id, video_id)
+        await videos_service.get_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
     try:
-        await saved_clips.delete_clip(db, user.id, clip_id)
+        await saved_clips.delete_clip(db, access.user.id, clip_id)
     except saved_clips.SavedClipNotFound as exc:
         raise HTTPException(status_code=404, detail="Clip not found") from exc
     return MessageResponse(detail="Clip deleted")
@@ -1172,9 +1181,11 @@ async def delete_saved_clip(
     description="Removes the video row (cascading to its frame index) and the stored file.",
     responses={404: {"description": "Video not found"}},
 )
-async def delete_video(user: CurrentUser, db: DbSession, video_id: uuid.UUID) -> MessageResponse:
+async def delete_video(
+    access: RegisteredUser, db: DbSession, video_id: uuid.UUID
+) -> MessageResponse:
     try:
-        await videos_service.delete_video(db, user.id, video_id)
+        await videos_service.delete_video(db, access.user.id, video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
     except videos_service.VideoForbidden as exc:

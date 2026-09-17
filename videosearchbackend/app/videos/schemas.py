@@ -41,6 +41,9 @@ class VideoOut(BaseModel):
     # one batched query; empty on the single-video routes, which don't pay for
     # the extra lookup.
     collection_ids: list[uuid.UUID] = []
+    # Deletion deadline for homepage-trial uploads; null for permanent
+    # videos. The demo UI counts down to it; the purge sweep enforces it.
+    expires_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

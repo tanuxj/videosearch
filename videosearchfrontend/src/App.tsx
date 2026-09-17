@@ -7,6 +7,7 @@ import { MarketingShell } from './components/Shell'
 import { ButtonLink } from './components/ui/Button'
 import { Eyebrow } from './components/ui/Text'
 import Home from './pages/Home'
+import Pricing from './pages/Pricing'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
@@ -29,7 +30,6 @@ const PROTECTED = new Set([
   '/workspaces',
 ])
 const AUTH_ONLY = new Set(['/login', '/signup'])
-
 /**
  * Routes single-page mode folds away. They stay in the bundle and still work
  * the moment `VITE_SINGLE_PAGE` is off — they just redirect to the one page
@@ -114,6 +114,8 @@ function Routes() {
   switch (route) {
     case '/':
       return <Home />
+    case '/pricing':
+      return <Pricing />
     case '/login':
       return <Login />
     case '/signup':

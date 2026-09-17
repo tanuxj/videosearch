@@ -20,7 +20,7 @@
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -133,6 +133,14 @@ class Video(Base, TimestampMixin):
     # Detected (or configured) spoken language, as an ISO-639-1 code where we
     # recognise it. Used as the subtitle track's `srclang`.
     language: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Deletion deadline for homepage-trial uploads — the server-side
+    # enforcement of the "your video is temporary" notice the demo UI shows.
+    # Null for every other video: registered accounts' uploads are permanent
+    # until they delete them. Set once at creation (see `apply_trial_expiry`)
+    # and enforced by the purge sweep in `app/videos/trial.py`.
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     frames: Mapped[list["Frame"]] = relationship(
         back_populates="video",
@@ -144,6 +152,16 @@ class Video(Base, TimestampMixin):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+    def past_expiry(self) -> bool:
+        """True when a trial deadline is set and has passed.
+
+        Permanent videos (no deadline) are never past expiry, whatever the
+        clock says — the purge sweep calls this before deleting anything.
+        """
+        if self.expires_at is None:
+            return False
+        return self.expires_at <= datetime.now(UTC)
 
     __table_args__ = (
         # A typo'd status must not silently insert — the pipeline only ever

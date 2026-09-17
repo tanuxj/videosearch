@@ -40,7 +40,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from app.core.config import get_settings
 from app.db.session import SessionFactory
@@ -530,9 +530,17 @@ async def _download(video_id: uuid.UUID, url: str) -> tuple[Path, Path]:
         # serves HLS as .ts). Nothing is stored under the old key yet, so
         # correcting it here is safe and keeps streaming types right. The key
         # keeps its random component — only the extension changes.
+        #
+        # PurePosixPath, not Path: a storage key is a POSIX object key (R2/S3),
+        # but on Windows `str(Path(...))` rewrites its separators to backslashes.
+        # A key saved that way breaks everything downstream — the stream Worker
+        # signs/derives the key from the URL path, where browsers normalise `
+        # back to `/`, so the signature never matches and playback 404s.
         ext = (ext or "mp4").lower().lstrip(".") or "mp4"
-        if f".{ext}" != Path(video.storage_key).suffix.lower():
-            video.storage_key = str(Path(video.storage_key).with_suffix(f".{ext}"))
+        if f".{ext}" != PurePosixPath(video.storage_key).suffix.lower():
+            video.storage_key = str(
+                PurePosixPath(video.storage_key).with_suffix(f".{ext}")
+            )
 
         video.name = service.display_name(title, ext)
         video.size_bytes = path.stat().st_size

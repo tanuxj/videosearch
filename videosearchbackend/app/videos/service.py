@@ -15,6 +15,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.guest import apply_trial_expiry
 from app.collections.models import CollectionVideo
 from app.core.config import get_settings
 from app.videos.models import VIDEO_SOURCES, TranscriptSegment, Video
@@ -139,6 +140,7 @@ async def create_video(
     source: str = "upload",
     workspace_id: uuid.UUID | None = None,
     file,
+    trial: bool = False,
 ) -> tuple[Video, Path | None]:
     """Persist an uploaded file and register its video row.
 
@@ -187,6 +189,9 @@ async def create_video(
             source=_valid_source(source),
             storage_key=key,
         )
+        # Homepage-trial uploads are stamped with their deletion deadline
+        # here — a no-op for registered accounts and when trials are off.
+        apply_trial_expiry(video, get_settings(), trial=trial)
         db.add(video)
         try:
             await db.commit()
@@ -228,6 +233,7 @@ async def create_url_video(
     size_bytes: int = 0,
     duration_seconds: float = 0.0,
     workspace_id: uuid.UUID | None = None,
+    trial: bool = False,
 ) -> Video:
     await _require_workspace_editor(db, owner_id, workspace_id)
     """Reserve a `processing` video row for a URL import.
@@ -253,6 +259,8 @@ async def create_url_video(
         source="url",
         storage_key=object_key(owner_id, video_id, ext),
     )
+    # Trial imports expire on the same clock as trial uploads.
+    apply_trial_expiry(video, get_settings(), trial=trial)
     db.add(video)
     await db.commit()
     await db.refresh(video)
@@ -268,6 +276,7 @@ async def create_pending_video(
     size_bytes: int,
     source: str = "upload",
     workspace_id: uuid.UUID | None = None,
+    trial: bool = False,
 ) -> Video:
     await _require_workspace_editor(db, owner_id, workspace_id)
     """Reserve a `processing` video row before its bytes arrive.
@@ -290,6 +299,8 @@ async def create_pending_video(
         source=_valid_source(source),
         storage_key=key,
     )
+    # Same trial stamping as the multipart upload path.
+    apply_trial_expiry(video, get_settings(), trial=trial)
     db.add(video)
     await db.commit()
     await db.refresh(video)

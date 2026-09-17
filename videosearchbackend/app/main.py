@@ -20,6 +20,7 @@ from app.videos import embedder
 from app.videos.routes import router as videos_router
 from app.videos.search import router as clip_search_router
 from app.videos.share import router as shares_router
+from app.videos.trial import start_trial_purger
 from app.workspaces.routes import router as workspaces_router
 
 settings = get_settings()
@@ -37,6 +38,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # request.
     if await db_session.ping():
         logger.info("Database connection OK")
+
+    # Homepage-trial enforcement: the loop that actually deletes trial
+    # videos when their 30-minute deadline passes. No-op (exits instantly)
+    # when trials are off. Cancelled on shutdown like the warmup below.
+    purge_task: asyncio.Task | None = None
+    if settings.trial_sessions_enabled:
+        purge_task = start_trial_purger()
+        logger.info(
+            "Trial purge running: videos expire after %d min",
+            settings.trial_ttl_minutes,
+        )
 
     # Importing torch and loading CLIP costs ~45 s cold. Doing it here on a
     # background thread means the first upload or search does not pay for it,
@@ -61,6 +73,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     if warmup_task is not None and not warmup_task.done():
         warmup_task.cancel()
+    if purge_task is not None and not purge_task.done():
+        purge_task.cancel()
     await db_session.dispose()
     logger.info("%s shutting down", settings.app_name)
 

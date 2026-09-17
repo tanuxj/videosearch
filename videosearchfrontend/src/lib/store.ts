@@ -99,6 +99,13 @@ export type VideoRecord = {
   poster?: string
   /** Server-side failure message (status === 'failed'). */
   error?: string
+  /**
+   * When the server will delete this video, for homepage-trial uploads.
+   * Absent for registered accounts' videos — they persist until deleted.
+   * The trial UI turns this into a live countdown; the purge is enforced
+   * server-side regardless of whether the tab is open.
+   */
+  expiresAt?: string
 }
 
 /** Backend `VideoOut` shape (snake_case) — mapped to `VideoRecord` below. */
@@ -118,6 +125,7 @@ type ApiVideo = {
   language?: string | null
   collection_ids?: string[]
   created_at: string
+  expires_at?: string | null
 }
 
 const objectUrls = new Map<string, string>()
@@ -186,6 +194,7 @@ function toRecord(video: ApiVideo): VideoRecord {
     collectionIds: video.collection_ids ?? [],
     createdAt: video.created_at,
     error: video.error ?? undefined,
+    expiresAt: video.expires_at ?? undefined,
   }
 }
 

@@ -38,7 +38,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import CurrentUser, DbSession
+from app.auth.deps import DbSession, RequestUserDep
 from app.core.config import get_settings
 from app.videos import embedder, query_expand
 from app.videos import service as videos_service
@@ -218,12 +218,16 @@ def _merge_scenes(frames, min_score: float, merge_window: float) -> list[list]:
     },
 )
 async def search_clips(
-    user: CurrentUser,
+    access: RequestUserDep,
     db: DbSession,
     payload: ClipSearchRequest,
 ) -> ClipSearchResponse:
+    # Trial-aware rather than account-only: the public homepage's whole job
+    # is to let an anonymous visitor search the video they just uploaded.
+    # Registered users resolve through the same dependency and see no
+    # difference; only the surrounding product features are gated.
     try:
-        video = await videos_service.get_video(db, user.id, payload.video_id)
+        video = await videos_service.get_video(db, access.user.id, payload.video_id)
     except videos_service.VideoNotFound as exc:
         raise HTTPException(status_code=404, detail="Video not found") from exc
 
