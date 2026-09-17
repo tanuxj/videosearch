@@ -50,6 +50,7 @@ export default function Search() {
     source: string
     tookMs: number
     expanded?: boolean
+    minScore?: number
   } | null>(null)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [lastQuery, setLastQuery] = useState('')
@@ -170,6 +171,7 @@ export default function Search() {
       source: result.source,
       tookMs: result.tookMs,
       expanded: result.expanded,
+      minScore: result.minScore,
     })
     setSearchError(result.error ?? null)
     setSearching(false)
@@ -423,6 +425,7 @@ export default function Search() {
                   clip={clip}
                   index={index}
                   topScore={Math.max(...clips.map((c) => c.score), 0.001)}
+                  minScore={meta?.minScore ?? 0}
                   thumb={thumbs.get(clip.frame)}
                   onOpen={setOpenClip}
                 />

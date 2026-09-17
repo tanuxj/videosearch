@@ -475,12 +475,22 @@ def test_search_someone_elses_video_is_404(
     assert response.status_code == 404
 
 
-def test_search_requires_auth(client: TestClient, clip_bytes: bytes) -> None:
+def test_search_anonymous_gets_trial_video_not_others(
+    client: TestClient, clip_bytes: bytes
+) -> None:
+    """Anonymous search runs as a trial session, scoped to its own videos.
+
+    Since the homepage trial, an unauthenticated search is allowed (it is the
+    demo's core feature — see tests/test_trial_api.py) but still resolves to a
+    trial session whose video scope is enforced: another session's video id is
+    indistinguishable from a missing one, 404. A random uuid guarantees the
+    anonymous session owns nothing with that id.
+    """
     response = client.post(
         "/api/v1/search/clips",
         json={"video_id": str(uuid.uuid4()), "prompt": "anything", "limit": 3},
     )
-    assert response.status_code == 401
+    assert response.status_code == 404
 
 
 def test_scene_aware_sampling_skips_redundant_frames(

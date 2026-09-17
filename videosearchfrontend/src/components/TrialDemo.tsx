@@ -91,6 +91,8 @@ export function TrialDemo() {
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [lastQuery, setLastQuery] = useState('')
+  /** Backend's absolute match floor for the last search — anchors the meters. */
+  const [minScore, setMinScore] = useState(0)
   const [openClip, setOpenClip] = useState<Clip | null>(null)
   const [src, setSrc] = useState('')
 
@@ -279,6 +281,7 @@ export function TrialDemo() {
 
       const result = await searchClips(target, trimmed)
       setClips(result.clips)
+      setMinScore(result.minScore ?? 0)
       setSearchError(result.error ?? null)
       setSearching(false)
     },
@@ -591,6 +594,7 @@ export function TrialDemo() {
                   clip={clip}
                   index={index}
                   topScore={topScore}
+                  minScore={minScore}
                   thumb={thumbs.get(clip.frame)}
                   onOpen={setOpenClip}
                 />

@@ -15,6 +15,7 @@ export function ClipResultCard({
   clip,
   index,
   topScore,
+  minScore = 0,
   thumb,
   onOpen,
 }: {
@@ -22,15 +23,27 @@ export function ClipResultCard({
   index: number
   /** Highest score in this result set — the meter is rank-relative. */
   topScore: number
+  /**
+   * Backend's absolute match threshold for this search. Anchoring the meter
+   * here keeps the display honest: a result set whose best score barely
+   * cleared the floor reads as a weak match (small %), not a confident 100%.
+   */
+  minScore?: number
   /** JPEG data URL for the match frame, when it could be captured. */
   thumb?: string
   onOpen: (clip: Clip) => void
 }) {
-  // Rank-relative confidence: the best scene in this result set always reads
-  // 100%, weaker scenes scale down from it. CLIP's raw cosine similarities are
-  // compressed (~0.25–0.45 for real matches), so an absolute scale would make
-  // every real match look like a near-miss.
-  const percent = Math.round((clip.score / Math.max(topScore, 0.001)) * 100)
+  // Hybrid confidence: rank-relative spread above the match floor, capped at
+  // 100%. Pure rank-relative (score/top) shows a junk 0.243 as "100%" when
+  // it's the best of a bad bunch; pure absolute shows every real CLIP match
+  // (~0.25–0.45) as a discouraging near-miss. Scaling the band [floor, top]
+  // to [0, 100] keeps ordering, rewards a clear winner, and refuses to
+  // celebrate a result set where nothing actually matched.
+  const band = Math.max(topScore - minScore, 0.001)
+  const percent = Math.min(
+    100,
+    Math.max(1, Math.round(((clip.score - minScore) / band) * 100)),
+  )
 
   return (
     // `group` is required here — the play overlay below reveals itself with

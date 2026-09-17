@@ -51,6 +51,12 @@ settings = get_settings()
 # Seconds of playback to show either side of a scene's first/last matching frame.
 _CLIP_PAD = 1.8
 
+# Curation: scenes scoring below this fraction of the best scene are dropped.
+# The absolute `search_min_similarity` floor stays as-is; this trims the weak
+# tail that only cleared it because nothing better existed — the results the
+# UI would otherwise show as 30–50% "matches" under a strong top hit.
+_RELATIVE_FLOOR = 0.5
+
 
 class ClipSearchRequest(BaseModel):
     video_id: uuid.UUID
@@ -141,6 +147,20 @@ async def run_clip_search(
     if spacing > settings.frame_interval_seconds:
         merge_window = max(merge_window, spacing * 1.5)
     scenes = _merge_scenes(frames, min_score, merge_window)
+
+    # Curation pass: a scene must clear both the absolute floor (above) and
+    # this relative bar against the best scene in the result set. Without it,
+    # a query with one strong hit ships a tail of 30–50% "matches" — scenes
+    # that cleared the absolute floor only because the prompt was vague, and
+    # that read as the video containing things it doesn't.
+    if scenes:
+        top = max(
+            max(frame[1] for frame in scene) for scene in scenes
+        )
+        floor = max(min_score, top * _RELATIVE_FLOOR)
+        scenes = [
+            scene for scene in scenes if max(frame[1] for frame in scene) >= floor
+        ]
 
     items = []
     for scene in scenes:
