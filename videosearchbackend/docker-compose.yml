@@ -59,9 +59,10 @@ x-backend-env: &backend_env
   LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
   LLM_EXPAND_PROMPTS: ${LLM_EXPAND_PROMPTS:-2}
   # Semantic-search tuning (passed through so you can tweak without a rebuild).
-  # Defaults mirror app/core/config.py — never leave these empty ('' fails
-  # pydantic's float/int parsing and the migrate service aborts).
-  SEARCH_MIN_SIMILARITY: ${SEARCH_MIN_SIMILARITY:-0.24}
+  # SEARCH_MIN_SIMILARITY empty = per-model default (0.24 CLIP / 0.08 SigLIP 2).
+  # Defaults mirror app/core/config.py — never leave the numeric one empty
+  # ('' fails pydantic's float/int parsing and the migrate service aborts).
+  SEARCH_MIN_SIMILARITY: ${SEARCH_MIN_SIMILARITY:-}
   SEARCH_MERGE_WINDOW_SECONDS: ${SEARCH_MERGE_WINDOW_SECONDS:-2.0}
   # Indexing-pipeline knobs (scene-aware sampling skips near-identical frames,
   # so long static files index far fewer frames). Defaults mirror config.py —
@@ -80,6 +81,17 @@ x-backend-env: &backend_env
   URL_IMPORT_ALLOW_PRIVATE: ${URL_IMPORT_ALLOW_PRIVATE:-false}
   URL_IMPORT_MAX_BATCH: ${URL_IMPORT_MAX_BATCH:-50}
   URL_IMPORT_EXPAND_PLAYLISTS: ${URL_IMPORT_EXPAND_PLAYLISTS:-false}
+  # Embedder + Florence-2 captions/grounding. Defaults mirror config.py —
+  # never leave EMBEDDING_MODEL empty ('' fails the Literal["clip","siglip2"]
+  # validation and the migrate service aborts).
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-clip}
+  CLIP_MODEL_NAME: ${CLIP_MODEL_NAME:-clip-ViT-B-32}
+  CLIP_BACKEND: ${CLIP_BACKEND:-onnx}
+  FLORENCE_MODEL_NAME: ${FLORENCE_MODEL_NAME:-microsoft/Florence-2-base}
+  CAPTIONS_ENABLED: ${CAPTIONS_ENABLED:-false}
+  GROUNDING_ENABLED: ${GROUNDING_ENABLED:-false}
+  CAPTION_MIN_SIMILARITY: ${CAPTION_MIN_SIMILARITY:-0.55}
+  CAPTION_BATCH_SIZE: ${CAPTION_BATCH_SIZE:-4}
   # Transcription (speech → text). An empty STT_API_KEY disables it entirely
   # and videos report transcript_status="skipped" — so this must be passed
   # through, or the container silently produces no subtitles however the

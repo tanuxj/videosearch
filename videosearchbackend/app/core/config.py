@@ -20,6 +20,28 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Obvious placeholder — refused outright when APP_ENV=production.
 DEV_JWT_SECRET = "dev-only-insecure-secret-change-me"
 
+# Embedding dimensions per `embedding_model`. Lives here (not in the embedder)
+# because models.py and the Alembic migrations need it without importing
+# torch/cv2 — migrations import app config, never app ML modules.
+EMBEDDING_DIMS = {"clip": 512, "siglip2": 768}
+
+# Real-match cosine-similarity band per `embedding_model`, for
+# `search_min_similarity`. The models put text↔image similarity on very
+# different scales — measured on real footage (motivational-speech video,
+# on-topic vs off-topic prompts):
+#
+#   CLIP      — unrelated pairs cluster ~0.2, real matches ~0.24–0.45 → 0.24.
+#   SigLIP 2  — unrelated pairs cluster ~0.02–0.06, real matches ~0.12–0.18
+#               (its sigmoid pre-training loss separates text↔image pairs far
+#               more sharply than CLIP's contrastive one). 0.24 — CLIP's floor
+#               — sits *above* SigLIP 2's real-match band, so every search
+#               returns zero clips. 0.08 clears real matches with margin while
+#               still discarding unrelated pairs.
+#
+# Resolved in `Settings.search_min_similarity_effective`; the env var keeps
+# priority for deployments that tuned it against their own footage.
+DEFAULT_SEARCH_MIN_SIMILARITY = {"clip": 0.24, "siglip2": 0.08}
+
 
 class Settings(BaseSettings):
     """Application settings, loaded from environment variables and `.env`."""
@@ -184,10 +206,24 @@ class Settings(BaseSettings):
     stream_url_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
 
     # ── Indexing pipeline ───────────────────────────────────────
-    # CLIP variant used to embed frames and prompts. Hugging Face model id
-    # for sentence-transformers; downloads to the HF cache on first use.
+    # Which vision-language embedder indexes frames and embeds prompts.
+    #
+    # "clip" — sentence-transformers `clip-ViT-B-32` (512-d, the original
+    #   pipeline). Fast on CPU; similarity runs ~0.2–0.45 for real matches.
+    #
+    # "siglip2" — Google `siglip2-base-patch16-224` (768-d, Feb 2025).
+    #   Better retrieval AND fine-grained detail understanding (its training
+    #   adds a localization-aware loss), which is what detail queries like
+    #   "the guy with long hair on the left" need. Same CPU speed class via
+    #   the ONNX path. Switching models changes the embedding space: after
+    #   flipping this, run `alembic upgrade head` (migration 0014 resizes the
+    #   frames.embedding column) and re-index every video — old vectors are
+    #   meaningless in the new space.
+    embedding_model: Literal["clip", "siglip2"] = "clip"
+    # Model id used when `embedding_model` is "clip" (kept for backwards
+    # compatibility with existing deployments' CLIP_MODEL_NAME overrides).
     clip_model_name: str = "clip-ViT-B-32"
-    # "onnx" runs the CLIP vision tower through onnxruntime (~1.4x faster on
+    # "onnx" runs the vision tower through onnxruntime (~1.4x faster on
     # CPU, identical vectors, lighter load); "torch" keeps the classic eager
     # path. Falls back to torch automatically if the export fails.
     clip_backend: Literal["onnx", "torch"] = "onnx"
@@ -228,14 +264,41 @@ class Settings(BaseSettings):
     # Rows per batch when writing embeddings to Postgres.
     index_batch_size: int = 128
 
+    # ── Frame captions + grounding (Florence-2) ────────────────
+    # Florence-2 (MIT, 0.23B params) is a small vision-language model that
+    # does three jobs for this app:
+    #
+    #   captions  — at index time, each kept frame gets a dense caption
+    #               ("a man in a red jacket stands beside a wooden fence at
+    #               sunset"). Captions are embedded and searched text↔text,
+    #               which is far sharper than CLIP's text↔image — this is the
+    #               detail-recall win for prompts like "two people shaking
+    #               hands" or relational phrasing.
+    #   grounding — on demand, locate a phrase inside one frame and get
+    #               bounding boxes back (`POST /videos/{id}/ground`), so the
+    #               lightbox can point at the object the user asked about.
+    #
+    # Both features share one loaded model. Off by default: the weights are
+    # ~0.5 GB and captioning adds CPU time per frame.
+    florence_model_name: str = "microsoft/Florence-2-base"
+    captions_enabled: bool = False
+    grounding_enabled: bool = False
+    # Minimum text↔text cosine similarity for a caption to count as a match
+    # in search. Text↔text similarities run far higher than text↔image
+    # (well-phrased pairs sit 0.6–0.9, unrelated pairs ~0.3–0.5), so this
+    # floor is deliberately much higher than `search_min_similarity`.
+    caption_min_similarity: float = Field(default=0.55, ge=0.0, le=1.0)
+    # Frames captioned per Florence-2 batch on the indexing worker thread.
+    caption_batch_size: int = Field(default=4, ge=1, le=16)
+
     # ── Semantic search ────────────────────────────────────────
     # Minimum cosine similarity (0–1) between the prompt embedding and a frame
-    # for it to count as a match. CLIP's text↔image similarity for unrelated
-    # content clusters around 0.2, so 0.24 is a safe floor for real matches;
-    # below it a search returns zero scenes instead of the video's least-bad
-    # frames. Raise it for stricter results, lower it if real matches are
-    # being missed on your footage.
-    search_min_similarity: float = Field(default=0.24, ge=0.0, le=1.0)
+    # for it to count as a match. The right floor is model-dependent because
+    # SigLIP 2's text↔image similarities sit on a very different scale from
+    # CLIP's — the default is resolved per `embedding_model` (see
+    # DEFAULT_SEARCH_MIN_SIMILARITY below); setting SEARCH_MIN_SIMILARITY in
+    # the environment still overrides either.
+    search_min_similarity: float | None = None
     # Consecutive matching frames closer than this (seconds) are merged into a
     # single scene, so a multi-second moment reads as one clip with a real
     # start and end rather than several overlapping single-frame windows.
@@ -353,6 +416,16 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
+    @field_validator("search_min_similarity", mode="before")
+    @classmethod
+    def _blank_min_similarity_is_unset(cls, value: object) -> object:
+        # docker-compose's ${VAR:-} passes an empty string through when the
+        # variable is unset; that means "use the per-model default", not a
+        # float-parsing error.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("guest_cookie_domain", "refresh_cookie_domain", mode="before")
     @classmethod
     def _blank_cookie_domain_is_host_only(cls, value: object) -> object:
@@ -429,6 +502,18 @@ class Settings(BaseSettings):
     @property
     def refresh_token_ttl_seconds(self) -> int:
         return self.refresh_token_ttl_days * 24 * 60 * 60
+
+    @property
+    def search_min_similarity_effective(self) -> float:
+        """`search_min_similarity` resolved per configured embedding model.
+
+        None means the env did not override it, so the model-appropriate
+        default applies (the two models' similarity scales are not
+        comparable — see DEFAULT_SEARCH_MIN_SIMILARITY).
+        """
+        if self.search_min_similarity is not None:
+            return self.search_min_similarity
+        return DEFAULT_SEARCH_MIN_SIMILARITY[self.embedding_model]
 
     @property
     def transcription_configured(self) -> bool:

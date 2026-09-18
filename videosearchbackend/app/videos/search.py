@@ -4,17 +4,18 @@ Contract (matches the frontend's ``searchClips`` in ``src/lib/api.ts``):
 
     POST /api/v1/search/clips
     { "video_id": "<uuid>", "prompt": "car red road", "limit": 9 }
-    → { "query": "...", "count": 1, "min_score": 0.24, "expanded": true, "items": [
+    → { "query": "...", "count": 1, "min_score": 0.08, "expanded": true, "items": [
          { "id": "...", "start": 3.2, "end": 9.2, "timestamp": 5.0, "score": 0.81 }
        ] }
 
 Search-quality guarantees (what makes this not "the least-bad random frame"):
 
 * **Real matches only.** Frames whose similarity falls below
-  ``search_min_similarity`` are excluded. Unrelated CLIP text↔image pairs
-  cluster around ~0.2 similarity, so a prompt that describes nothing in the
-  video returns ``count: 0`` — never a ranked list of its most dissimilar-to-
-  least-dissimilar frames.
+  ``search_min_similarity`` are excluded. Unrelated text↔image pairs cluster
+  around ~0.2 under CLIP and ~0.02–0.06 under SigLIP 2 (the default is
+  resolved per model — see ``DEFAULT_SEARCH_MIN_SIMILARITY``), so a prompt
+  that describes nothing in the video returns ``count: 0`` — never a ranked
+  list of its most dissimilar-to-least-dissimilar frames.
 * **Query expansion (the "middleman").** When an LLM is configured, the raw
   prompt is rewritten into a few visually-grounded variants (see
   ``query_expand.py``) and every variant is embedded; each frame keeps its
@@ -40,9 +41,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import DbSession, RequestUserDep
 from app.core.config import get_settings
-from app.videos import embedder, query_expand
+from app.videos import captions, embedder, pipeline, query_expand
 from app.videos import service as videos_service
 from app.videos.models import Frame
+from app.videos.storage import storage
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -56,6 +58,13 @@ _CLIP_PAD = 1.8
 # tail that only cleared it because nothing better existed — the results the
 # UI would otherwise show as 30–50% "matches" under a strong top hit.
 _RELATIVE_FLOOR = 0.5
+
+# Per-variant caption match, before merging into frame scores. Caption
+# text↔text similarity runs far higher than text↔image (well-phrased pairs
+# 0.6–0.9, unrelated ~0.3–0.5), so a raw caption cosine would dominate the
+# CLIP-score scale it is merged into — a caption that says the thing (cos ~0.7)
+# lands near CLIP's real-match band (0.24–0.45) only after discounting.
+_CAPTION_WEIGHT = 0.35
 
 
 class ClipSearchRequest(BaseModel):
@@ -78,6 +87,28 @@ class ClipSearchResponse(BaseModel):
     min_score: float
     expanded: bool
     items: list[ClipItem]
+
+
+class GroundRequest(BaseModel):
+    """Locate a phrase inside one frame of a video (Florence-2 grounding)."""
+
+    timestamp: float = Field(ge=0, description="Seconds into the video")
+    phrase: str = Field(min_length=1, max_length=200, examples=["red car"])
+
+
+class GroundBox(BaseModel):
+    """One bounding box, normalised 0–1 (x1, y1, x2, y2 — y grows downward)."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+
+class GroundResponse(BaseModel):
+    phrase: str
+    timestamp: float
+    boxes: list[GroundBox]
 
 
 @dataclass
@@ -111,7 +142,7 @@ async def run_clip_search(
     variants = await run_in_threadpool(query_expand.expand_prompt, prompt)
     expanded = variants != [prompt]
 
-    min_score = settings.search_min_similarity
+    min_score = settings.search_min_similarity_effective
     merge_window = settings.search_merge_window_seconds
 
     # Per-frame best similarity across all query variants: an expanded variant
@@ -135,6 +166,37 @@ async def run_clip_search(
             current = best.get(row.id)
             if current is None or score > current[1]:
                 best[row.id] = (row.timestamp_sec, score, str(row.id))
+
+    # Caption channel (Florence-2): match the query against each frame's stored
+    # caption embedding — text↔text, which nails relational/detail prompts
+    # ("the guy with long hair standing next to the car") that image embeddings
+    # only gesture at. A frame whose caption says the thing is pulled up to the
+    # match band even when the raw image similarity is lukewarm. Frames without
+    # captions simply don't participate. No separate pass through query_expand:
+    # the variants are already visual phrasings, exactly what captions are.
+    caption_floor = settings.caption_min_similarity
+    for variant in variants:
+        query_vector = await run_in_threadpool(embedder.embed_text, variant)
+        distance = Frame.caption_embedding.cosine_distance(query_vector)
+        result = await db.execute(
+            select(
+                Frame.id,
+                Frame.timestamp_sec,
+                (1 - distance).label("similarity"),
+            )
+            .where(
+                Frame.video_id == video_id,
+                Frame.caption_embedding.is_not(None),
+                # Pre-filter in SQL: below the caption floor, discounting won't
+                # rescue it — no point shipping the similarity back.
+                (1 - distance) >= caption_floor,
+            )
+        )
+        for row in result.all():
+            boosted = float(row.similarity) * _CAPTION_WEIGHT
+            current = best.get(row.id)
+            if current is None or boosted > current[1]:
+                best[row.id] = (row.timestamp_sec, boosted, str(row.id))
 
     frames = sorted(best.values(), key=lambda frame: frame[0])
     # Keyframe sampling spaces frames by content, not at a fixed rate. A video
@@ -228,7 +290,8 @@ def _merge_scenes(frames, min_score: float, merge_window: float) -> list[list]:
     summary="Find matching moments in a video",
     description=(
         "Embeds the prompt (plus LLM-expanded variants when configured) with "
-        "CLIP and returns the scenes (merged runs of matching frames) whose "
+        "embedding model and returns the scenes (merged runs of matching "
+        "frames) whose "
         "visual content is close enough, with timestamps and similarity "
         "scores. Returns an empty list when nothing in the video matches."
     ),
@@ -270,4 +333,60 @@ async def search_clips(
         min_score=round(result.min_score, 4),
         expanded=result.expanded,
         items=result.items,
+    )
+
+
+@router.post(
+    "/{video_id}/ground",
+    response_model=GroundResponse,
+    summary="Locate a phrase inside one frame (visual grounding)",
+    description=(
+        "Runs Florence-2 phrase grounding on the frame at `timestamp` and "
+        "returns bounding boxes (normalised 0-1) for every occurrence of the "
+        "phrase. Empty `boxes` means the model found nothing there. Requires "
+        "`grounding_enabled` in settings; returns 503 when it is off."
+    ),
+    responses={
+        404: {"description": "Video not found, or no frame at that timestamp"},
+        503: {"description": "Grounding is disabled on this deployment"},
+    },
+)
+async def ground_phrase(
+    access: RequestUserDep,
+    db: DbSession,
+    video_id: uuid.UUID,
+    payload: GroundRequest,
+) -> GroundResponse:
+    if not settings.grounding_enabled:
+        raise HTTPException(status_code=503, detail="Grounding is not enabled")
+
+    try:
+        video = await videos_service.get_video(db, access.user.id, video_id)
+    except videos_service.VideoNotFound as exc:
+        raise HTTPException(status_code=404, detail="Video not found") from exc
+
+    if video.status != "ready":
+        raise HTTPException(status_code=409, detail="Video is still being indexed")
+
+    # Decode the frame off the loop, then run the model off the loop — both
+    # are CPU-bound, and together they are roughly a second of work.
+    try:
+        local_path = await run_in_threadpool(storage.get_local_path, video.storage_key)
+        frame = await run_in_threadpool(
+            pipeline.frame_at, local_path, payload.timestamp
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - unreadable storage is a 500
+        raise HTTPException(status_code=500, detail="Could not read video file") from exc
+
+    boxes = await run_in_threadpool(captions.locate_phrase, frame, payload.phrase)
+    return GroundResponse(
+        phrase=payload.phrase,
+        timestamp=payload.timestamp,
+        boxes=[
+            GroundBox(x1=b[0], y1=b[1], x2=b[2], y2=b[3])
+            for b in boxes
+            if len(b) == 4
+        ],
     )

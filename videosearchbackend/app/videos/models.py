@@ -5,9 +5,12 @@
   message). `storage_key` is the object key inside the R2 bucket (or the
   relative path under the local upload dir when R2 is not configured).
   `frames_total` / `frames_indexed` let the frontend show real progress.
-* ``frames`` — one row per indexed frame, holding the CLIP image embedding
-  (512 dims for clip-ViT-B-32) and the timestamp it came from. Search is a
-  cosine-similarity query over `embedding`, accelerated by the HNSW index.
+* ``frames`` — one row per indexed frame, holding the vision-language image
+  embedding (dims follow the configured `embedding_model`: 512 for CLIP,
+  768 for SigLIP 2) plus the timestamp it came from, and — when Florence-2
+  captioning is enabled — the dense caption of what the frame shows. Search
+  is a cosine-similarity query over `embedding` (HNSW-accelerated) merged
+  with a text↔text match over `caption`.
 * ``saved_clips`` — scenes the user asked to keep: auto-extracted from a
   URL import that carried a prompt (see ``url_import.py``), stored as
   start/end/frame/score so the library can show them without a search.
@@ -41,10 +44,15 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.config import EMBEDDING_DIMS, get_settings
 from app.db.base import Base, TimestampMixin
 
-# CLIP (clip-ViT-B-32) embeds both frames and text into this many dimensions.
-EMBEDDING_DIM = 512
+# Embedding dimension of the configured model (see `EMBEDDING_DIMS`). The
+# column type below follows this constant, so switching `embedding_model` in
+# settings + running the migration resizes the column to the new space. Kept
+# as a module constant because pgvector's Vector() and the HNSW index both
+# need a plain int at import time.
+EMBEDDING_DIM = EMBEDDING_DIMS[get_settings().embedding_model]
 
 VIDEO_STATUSES = ("processing", "ready", "failed")
 
@@ -288,6 +296,19 @@ class Frame(Base):
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM), nullable=False)
     # R2 object key (or local path) of the thumbnail JPEG for this frame.
     thumb_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Florence-2's dense caption of what this frame shows ("a man in a red
+    # jacket stands beside a wooden fence at sunset"), when captions are
+    # enabled at index time. Embedded and searched text↔text — far sharper
+    # than text↔image for relational prompts ("the guy with long hair standing
+    # next to the car"). Null on frames indexed before captioning was turned
+    # on; those are found through the embedding only.
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # L2-normalised embedding of `caption` in the same space as text queries
+    # (the model's text tower). Kept so caption search is a pure vector
+    # lookup per frame rather than re-embedding every caption at query time.
+    caption_embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIM), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

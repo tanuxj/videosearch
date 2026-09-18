@@ -57,7 +57,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.session import SessionFactory
 from app.notifications import service as notifications_service
-from app.videos import embedder, transcribe
+from app.videos import captions, embedder, transcribe
 from app.videos.clips import ffmpeg_binary
 from app.videos.models import Frame, TranscriptSegment, Video
 from app.videos.storage import storage
@@ -530,8 +530,22 @@ def _process_video(
             try:
                 started = time.perf_counter()
                 embeddings = embedder.embed_images(frames)
+                # Captioning rides the same thread: it is CPU-bound like the
+                # embedder, and the frames are already in hand. Failure is
+                # chunk-local — those frames just keep their (null) caption,
+                # and search falls back to the embedding for them.
+                chunk_captions: list[str] | None = None
+                caption_vectors: list[list[float]] | None = None
+                if settings.captions_enabled:
+                    try:
+                        chunk_captions = captions.caption_frames(frames)
+                        caption_vectors = embedder.embed_texts(chunk_captions)
+                    except Exception:  # noqa: BLE001 - captions are optional
+                        logger.exception(
+                            "Captioning failed for a chunk of video (frames keep null captions)"
+                        )
                 state["embed_seconds"] += time.perf_counter() - started
-                emit(timestamps, embeddings, kept, candidates)
+                emit(timestamps, embeddings, kept, candidates, chunk_captions, caption_vectors)
                 state["indexed"] += len(timestamps)
             except Exception as exc:  # noqa: BLE001 - re-raised by the sampler below
                 state["error"] = exc
@@ -622,20 +636,47 @@ def _process_video(
     )
 
 
+def frame_at(path: Path, timestamp: float) -> np.ndarray:
+    """Decode one RGB frame at `timestamp` seconds, at the model's input size.
+
+    Serves on-demand grounding: the lightbox asks "where is X in this frame",
+    and Florence-2 needs the pixels. Input seek (-ss before -i) jumps to the
+    nearest preceding keyframe and decodes forward from there — one frame is
+    cheap. Raises the same OpenCV error path as `probe_file` if the file
+    cannot be opened at all; an empty decode (timestamp past the end) raises
+    ValueError, which the route maps to 404-level "no such frame".
+    """
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video file: {path.name}")
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000.0)
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or frame is None:
+        raise ValueError(f"No frame at {timestamp:.2f}s")
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+
 async def _insert_chunk(
     db: AsyncSession,
     video: Video,
     timestamps: list,
     embeddings: list,
+    captions: list[str] | None = None,
+    caption_embeddings: list | None = None,
 ) -> None:
-    """Write one chunk of frames and bump the indexed counter."""
-    await db.execute(
-        insert(Frame),
-        [
-            {"video_id": video.id, "timestamp_sec": ts, "embedding": emb}
-            for ts, emb in zip(timestamps, embeddings, strict=True)
-        ],
-    )
+    """Write one chunk of frames (and captions, when captioning ran) and bump the counter."""
+    rows = []
+    for i, (ts, emb) in enumerate(zip(timestamps, embeddings, strict=True)):
+        row = {"video_id": video.id, "timestamp_sec": ts, "embedding": emb}
+        if captions is not None and i < len(captions):
+            row["caption"] = captions[i]
+            if caption_embeddings is not None and i < len(caption_embeddings):
+                row["caption_embedding"] = caption_embeddings[i]
+        rows.append(row)
+    await db.execute(insert(Frame), rows)
     video.frames_indexed += len(timestamps)
     await db.commit()
 
@@ -842,9 +883,18 @@ async def index_video(
             chunks: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
 
-            def emit(timestamps: list, embeddings: list, kept: int, candidates: int) -> None:
+            def emit(
+                timestamps: list,
+                embeddings: list,
+                kept: int,
+                candidates: int,
+                chunk_captions: list[str] | None,
+                caption_vectors: list | None,
+            ) -> None:
                 loop.call_soon_threadsafe(
-                    chunks.put_nowait, (_CHUNK, timestamps, embeddings, kept, candidates)
+                    chunks.put_nowait,
+                    (_CHUNK, timestamps, embeddings, kept, candidates,
+                     chunk_captions, caption_vectors),
                 )
 
             def worker() -> None:
@@ -872,7 +922,8 @@ async def index_video(
             while True:
                 kind, *payload = await chunks.get()
                 if kind == _CHUNK:
-                    timestamps, embeddings, kept, candidates = payload
+                    (timestamps, embeddings, kept, candidates,
+                     chunk_captions, caption_vectors) = payload
                     if candidates > 0:
                         # Re-project the denominator toward what will actually be
                         # embedded so the progress bar tracks real completion
@@ -880,7 +931,9 @@ async def index_video(
                         projected = math.ceil(expected * kept / candidates)
                         video.frames_total = max(video.frames_indexed, projected)
                     insert_started = time.perf_counter()
-                    await _insert_chunk(db, video, timestamps, embeddings)
+                    await _insert_chunk(
+                        db, video, timestamps, embeddings, chunk_captions, caption_vectors
+                    )
                     db_seconds += time.perf_counter() - insert_started
                 elif kind == _DONE:
                     stats = payload[0]

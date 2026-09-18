@@ -1,15 +1,24 @@
-"""Lazy CLIP embedder (sentence-transformers `clip-ViT-B-32`).
+"""Lazy vision-language embedder: CLIP or SigLIP 2, chosen by config.
+
+Two models behind one interface (`embedding_model` setting):
+
+* **clip** — sentence-transformers `clip-ViT-B-32`, 512-d. The original
+  pipeline; fast on CPU.
+* **siglip2** — Google `siglip2-base-patch16-224`, 768-d. Better retrieval
+  and fine-grained detail (its training includes a localization-aware
+  loss). Loaded through transformers directly — sentence-transformers'
+  CLIP module assumes the CLIP architecture, and SigLIP's sigmoid loss and
+  different processor do not fit it.
 
 Two inference paths for image embeddings:
 
-* **ONNX** (default, ``clip_backend="onnx"``) — the CLIP vision tower
-  (vision model + projection + L2 norm) is exported to a single ONNX graph
-  on first use and run through onnxruntime. Vectors are bit-for-bit
-  compatible with the torch path (measured cosine similarity 1.0), so
-  existing pgvector indexes stay valid. Roughly ~1.4x faster on CPU than
-  eager torch and much lighter to load.
-* **torch** (``clip_backend="torch"``) — the classic sentence-transformers
-  path, kept as a fallback when onnxruntime is missing or the export fails.
+* **ONNX** (default, ``clip_backend="onnx"``) — the vision tower (vision
+  model + projection + L2 norm) is exported to a single ONNX graph on first
+  use and run through onnxruntime. Vectors match the torch path to within
+  float noise. Roughly ~1.4x faster on CPU than eager torch and much
+  lighter to load.
+* **torch** (``clip_backend="torch"``) — the eager path, kept as a fallback
+  when onnxruntime is missing or the export fails.
 
 Text embedding always uses torch: queries are rare and the text tower is
 small, so there is nothing to gain from a second ONNX graph.
@@ -26,9 +35,11 @@ search arriving mid-index.
 Embeddings are L2-normalised, which is what makes pgvector's cosine distance
 (`<=>`) a true similarity measure.
 
-Vision input must be PIL Images: sentence-transformers' CLIP module branches
-on ``isinstance(data, PIL.Image.Image)`` — a numpy array would silently be
-treated as *text* and crash in the tokenizer.
+The input size differs per model (CLIP and SigLIP2-base both take 224px, but
+the constant is read from the loaded processor rather than assumed) and the
+pipeline consumes `embedder.INPUT_SIZE`, so a model swap needs no pipeline
+code change. Switching models changes the embedding space — vectors must be
+re-indexed (migration 0014 + re-upload or re-run of the pipeline).
 """
 
 import logging
@@ -55,39 +66,79 @@ _vision_session: Any = None
 # export on every 32-frame chunk — fall back to torch and stay there.
 _vision_backend_failed = False
 
-# CLIP's vision tower takes 224x224. Its own processor resizes to this anyway,
-# so handing it full-resolution frames pays PIL-conversion and (slow) processor
-# resize cost for pixels that are about to be thrown away. Downscaling here with
-# cv2 first measured ~4x faster end-to-end on a 720p batch.
 #
-# Public, because the indexing pipeline has its decoder emit frames at exactly
-# this size — the geometry belongs to CLIP, so it is defined here once.
-CLIP_INPUT_SIZE = 224
-_INPUT_SIZE = CLIP_INPUT_SIZE
+# SigLIP 2 (HF `siglip2-base-patch16-224`): 768-d image/text vectors.
+# Kept beside CLIP's 512 so the frames.embedding column can be resized by
+# migration (and so `EMBEDDING_DIM` in models.py can be derived).
+#
+MODEL_DIMS = {"clip": 512, "siglip2": 768}
+MODEL_IDS = {
+    "clip": settings.clip_model_name,
+    "siglip2": "google/siglip2-base-patch16-224",
+}
+
+#: Vision input size of the configured model (both take 224px square).
+#: Defined after the constants above; the pipeline reads this.
+INPUT_SIZE = 224
+
+# Backwards-compatible alias — the pipeline used to import CLIP_INPUT_SIZE.
+CLIP_INPUT_SIZE = INPUT_SIZE
+_INPUT_SIZE = INPUT_SIZE
 
 
 def _ensure_model() -> Any:
     """Load the shared model, downloading weights on first call.
 
-    Caller must hold `_lock`. Tries the local HF cache first.
-    sentence-transformers otherwise revalidates every file against
-    huggingface.co on *each* load, even when the weights are already cached —
-    and when that network is slow or blocked it burns five retries with
-    backoff (~40 s) before falling back to the cache. Asking for cached files
-    up front makes a warm start immediate and offline-safe; the online path
-    still runs when nothing is cached yet.
+    Caller must hold `_lock`. For **clip** the value is a sentence-transformers
+    ``(model, processor)`` tuple, exactly as before. For **siglip2** it is the
+    HF `SiglipModel` itself (the processor is loaded separately in
+    `_get_processor`, because SigLIP has no sentence-transformers wrapper).
+
+    Both paths try the local HF cache first: transformers otherwise revalidates
+    every file against huggingface.co on *each* load, even when the weights are
+    already cached — and when that network is slow or blocked it burns five
+    retries with backoff (~40 s) before falling back to the cache. Asking for
+    cached files up front makes a warm start immediate and offline-safe; the
+    online path still runs when nothing is cached yet.
     """
     global _model
-    if _model is None:
-        from sentence_transformers import SentenceTransformer
+    if _model is not None:
+        return _model
+    if settings.embedding_model == "siglip2":
+        from transformers import AutoModel
 
+        model_id = MODEL_IDS["siglip2"]
         try:
-            _model = SentenceTransformer(settings.clip_model_name, local_files_only=True)
-            logger.info("CLIP loaded from local cache (no network)")
+            _model = AutoModel.from_pretrained(model_id, local_files_only=True)
+            logger.info("SigLIP 2 loaded from local cache (no network)")
         except Exception:
-            logger.info("CLIP not in cache; downloading weights")
-            _model = SentenceTransformer(settings.clip_model_name)
+            logger.info("SigLIP 2 not in cache; downloading weights")
+            _model = AutoModel.from_pretrained(model_id)
+        _model.eval()
+        return _model
+
+    from sentence_transformers import SentenceTransformer
+
+    try:
+        _model = SentenceTransformer(settings.clip_model_name, local_files_only=True)
+        logger.info("CLIP loaded from local cache (no network)")
+    except Exception:
+        logger.info("CLIP not in cache; downloading weights")
+        _model = SentenceTransformer(settings.clip_model_name)
     return _model
+
+
+def _core_model() -> Any:
+    """The underlying HF model (CLIPModel or SiglipModel), for ONNX export.
+
+    sentence-transformers wraps CLIPModel as ``(core_model, processor)``;
+    SigLIP 2 is loaded as the bare HF model. The ONNX exporter only needs the
+    core vision tower, and this is the one accessor that works for both.
+    """
+    model = _ensure_model()
+    if settings.embedding_model == "siglip2":
+        return model
+    return model[0].model  # SentenceTransformer -> (CLIPModel, processor)
 
 
 def load() -> Any:
@@ -129,12 +180,27 @@ def _to_clip_input(frame: np.ndarray) -> Image.Image:
 
 
 def _get_processor() -> Any:
-    """The model's CLIPProcessor, loaded once and shared."""
+    """The model's processor, loaded once and shared.
+
+    CLIP's comes attached to the sentence-transformers wrapper; SigLIP 2's is
+    loaded directly (AutoProcessor handles the SigLIP2 image mean/std and
+    tokenizer in one object).
+    """
     global _processor
     if _processor is None:
         with _lock:
             if _processor is None:
-                _processor = _ensure_model()[0].processor
+                if settings.embedding_model == "siglip2":
+                    from transformers import AutoProcessor
+
+                    try:
+                        _processor = AutoProcessor.from_pretrained(
+                            MODEL_IDS["siglip2"], local_files_only=True
+                        )
+                    except Exception:
+                        _processor = AutoProcessor.from_pretrained(MODEL_IDS["siglip2"])
+                else:
+                    _processor = _ensure_model()[0].processor
     return _processor
 
 
@@ -146,31 +212,42 @@ def _onnx_dir() -> Path:
     model weights and never needs re-exporting.
     """
     base = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
-    return base / "onnx" / settings.clip_model_name
+    # Keyed by the configured embedding model so switching models never
+    # reuses (or clobbers) the other one's exported graph.
+    return base / "onnx" / settings.embedding_model
 
 
 def _export_vision_onnx(destination: Path) -> None:
-    """Export CLIP's vision tower + projection + L2 norm into one ONNX graph.
+    """Export the vision tower (+ projection, for CLIP) + L2 norm into one ONNX graph.
 
-    Needs the torch model loaded (it is) and the `onnx`/`onnxscript` packages.
-    Runs once per model version; the result is written atomically so a crash
-    mid-export cannot leave a half-written file that later loads fail on.
+    CLIPModel and SiglipModel both expose `vision_model` and both pool with
+    their CLS token (`pooler_output`), but only CLIP projects that pooled
+    output into the joint embedding space with a separate `visual_projection`
+    layer — SigLIP has no such layer at all: its vision tower's hidden size
+    already *is* the joint embedding dim, and `SiglipModel.get_image_features`
+    returns `pooler_output` untouched. Applying a CLIP-style projection to it
+    would be wrong even if the attribute existed. Needs the torch model loaded
+    (it is) and the `onnx`/`onnxscript` packages. Runs once per model version;
+    the result is written atomically so a crash mid-export cannot leave a
+    half-written file that later loads fail on.
     """
     import torch
 
-    clip = _ensure_model()[0].model  # caller already holds `_lock`
+    clip = _core_model()  # caller already holds `_lock`
+    is_siglip = settings.embedding_model == "siglip2"
 
     class _VisionProjector(torch.nn.Module):
-        """vision_model → pooler CLS → visual projection → L2 normalize."""
+        """vision_model → pooler CLS → (CLIP only: visual projection) → L2 normalize."""
 
         def __init__(self, clip_model: Any) -> None:
             super().__init__()
             self.vision_model = clip_model.vision_model
-            self.projection = clip_model.visual_projection
+            self.projection = None if is_siglip else clip_model.visual_projection
 
         def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-            pooled = self.vision_model(pixel_values)[1]
-            vecs = self.projection(pooled)
+            outputs = self.vision_model(pixel_values)
+            pooled = outputs.pooler_output
+            vecs = pooled if self.projection is None else self.projection(pooled)
             return torch.nn.functional.normalize(vecs, p=2, dim=1)
 
     projector = _VisionProjector(clip).eval()
@@ -203,7 +280,7 @@ def _export_vision_onnx(destination: Path) -> None:
             dynamo=False,
         )
     os.replace(tmp, destination)
-    logger.info("Exported CLIP vision tower to ONNX: %s", destination)
+    logger.info("Exported %s vision tower to ONNX: %s", settings.embedding_model, destination)
 
 
 def _get_vision_session() -> Any | None:
@@ -269,12 +346,13 @@ def prewarm() -> None:
 
 
 def embed_images(images: list) -> list[list[float]]:
-    """Embed a batch of decoded frames (RGB numpy arrays) into 512-d vectors.
+    """Embed a batch of decoded frames (RGB numpy arrays) into unit vectors.
 
-    Frames are downscaled to 224x224 and converted to PIL Images first — CLIP's
-    tokenizer only routes PIL.Image instances to the vision tower; numpy arrays
-    would be misread as text. Preprocessing (normalisation) runs through the
-    same CLIPProcessor in both paths, so ONNX and torch vectors are identical.
+    Frames are downscaled to the model's input size and converted to PIL
+    Images first — the processors' tokenizers only route PIL.Image instances
+    to the vision tower; numpy arrays would be misread as text.
+    Preprocessing (normalisation) runs through the same processor in both
+    paths, so ONNX and torch vectors are identical.
     """
     pil_images = [_to_clip_input(frame) for frame in images]
     session = _get_vision_session()
@@ -291,6 +369,23 @@ def embed_images(images: list) -> list[list[float]]:
         norms[norms == 0] = 1.0
         return (vectors / norms).tolist()
 
+    # Torch fallback. CLIP goes through sentence-transformers' encode();
+    # SigLIP 2 has no wrapper, so the forward pass runs explicitly: processor
+    # → vision tower → pooler → L2 norm, matching the ONNX graph. No
+    # projection step — unlike CLIP, SigLIP has no `visual_projection`; its
+    # vision tower's pooled output already sits in the joint embedding space
+    # (see `SiglipModel.get_image_features`, which returns it untouched).
+    if settings.embedding_model == "siglip2":
+        import torch
+
+        model = _ensure_model()
+        processor = _get_processor()
+        batch = processor(images=pil_images, return_tensors="pt")
+        with _lock, torch.no_grad():
+            outputs = model.vision_model(**batch)
+            vectors = torch.nn.functional.normalize(outputs.pooler_output, p=2, dim=1)
+        return vectors.numpy().tolist()
+
     model = load()
     with _lock:
         vectors = model.encode(
@@ -303,13 +398,39 @@ def embed_images(images: list) -> list[list[float]]:
 
 
 def embed_text(text: str) -> list[float]:
-    """Embed a natural-language prompt into the same 512-d space."""
+    """Embed a natural-language prompt into the model's text space."""
+    return embed_texts([text])[0]
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Embed several prompts in one batch (used by caption search too).
+
+    Caption search embeds every caption at index time, so this is the batched
+    form `embed_text` also routes through — one tokenizer pass and one forward
+    per batch instead of per string.
+    """
+    if settings.embedding_model == "siglip2":
+        import torch
+
+        model = _ensure_model()
+        processor = _get_processor()
+        batch = processor(
+            text=texts, return_tensors="pt", padding="max_length", truncation=True
+        )
+        with _lock, torch.no_grad():
+            outputs = model.get_text_features(
+                input_ids=batch["input_ids"],
+                attention_mask=batch.get("attention_mask"),
+            )
+            vectors = torch.nn.functional.normalize(outputs, p=2, dim=1)
+        return vectors.numpy().tolist()
+
     model = load()
     with _lock:
-        vector = model.encode(
-            [text],
+        vectors = model.encode(
+            texts,
             convert_to_numpy=True,
             normalize_embeddings=True,
             show_progress_bar=False,
         )
-    return vector[0].tolist()
+    return vectors.tolist()

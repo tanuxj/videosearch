@@ -31,11 +31,25 @@ os.environ.setdefault("INDEX_ON_UPLOAD", "false")
 # Startup would otherwise preload the real CLIP weights (~1.2 GB) as soon as a
 # TestClient enters the app's lifespan.
 os.environ.setdefault("PREWARM_CLIP_MODEL", "false")
+# Most tests mock the embedder/captions modules with CLIP-shaped fakes (512-d,
+# no projection quirks) and never touch the real models. A deployment's .env
+# may set EMBEDDING_MODEL=siglip2 / CAPTIONS_ENABLED=true for production, and
+# without pinning these here that would leak into the suite: mismatched fakes,
+# or a test silently trying to download real SigLIP2/Florence-2 weights over
+# the network. Tests that want the real flag on set it themselves (see
+# test_captions_grounding_api.py).
+os.environ.setdefault("EMBEDDING_MODEL", "clip")
+os.environ.setdefault("CAPTIONS_ENABLED", "false")
+os.environ.setdefault("GROUNDING_ENABLED", "false")
 # The suite asserts the real signup/login/token behaviour, so it must not
 # inherit AUTH_ENABLED=false from a deployment's .env — a developer running an
 # open-access instance locally would otherwise see every auth test fail.
-# Tests that want the open-access path set it themselves.
+# Tests that want the open-access path set it themselves. TRIAL_ENABLED is
+# pinned for the same reason: with it inherited as true from the deployment
+# .env, anonymous requests get a trial session instead of 401 and the
+# url-import auth tests fail (that file sets it back itself when it runs).
 os.environ.setdefault("AUTH_ENABLED", "true")
+os.environ.setdefault("TRIAL_ENABLED", "false")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

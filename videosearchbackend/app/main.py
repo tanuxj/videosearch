@@ -16,7 +16,7 @@ from app.core.logging import configure_logging
 from app.db import session as db_session
 from app.history.routes import router as history_router
 from app.notifications.routes import router as notifications_router
-from app.videos import embedder
+from app.videos import captions, embedder
 from app.videos.routes import router as videos_router
 from app.videos.search import router as clip_search_router
 from app.videos.share import router as shares_router
@@ -63,9 +63,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 # Also exports + loads the ONNX vision session when enabled,
                 # so the one-time ~30s export never lands on a user request.
                 await asyncio.to_thread(embedder.prewarm)
-                logger.info("CLIP model ready in %.1fs", time.perf_counter() - started)
+                # Florence-2 rides the same warmup when captions/grounding are
+                # on; a no-op (and free) when both are off.
+                await asyncio.to_thread(captions.prewarm)
+                logger.info("Embedding models ready in %.1fs", time.perf_counter() - started)
             except Exception:  # noqa: BLE001 - degraded, not fatal
-                logger.exception("CLIP model preload failed; will retry on first use")
+                logger.exception("Model preload failed; will retry on first use")
 
         warmup_task = asyncio.create_task(_prewarm())
 
