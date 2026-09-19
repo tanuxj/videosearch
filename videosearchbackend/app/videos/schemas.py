@@ -44,6 +44,13 @@ class VideoOut(BaseModel):
     # Deletion deadline for homepage-trial uploads; null for permanent
     # videos. The demo UI counts down to it; the purge sweep enforces it.
     expires_at: datetime | None = None
+    # How long indexing took, and when it ran. `processing_seconds` is null
+    # in exactly two cases the client must tell apart: indexing is still
+    # running (count up from `processing_started_at` for a live timer), or
+    # the video predates the timing columns (show nothing).
+    processing_started_at: datetime | None = None
+    processing_completed_at: datetime | None = None
+    processing_seconds: float | None = None
     created_at: datetime
     updated_at: datetime
 

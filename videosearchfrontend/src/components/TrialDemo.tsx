@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ProcessingTimer } from './ProcessingTimer'
 import type { DragEvent, KeyboardEvent } from 'react'
 import {
   captureFrames,
@@ -10,7 +11,7 @@ import {
 import type { VideoRecord } from '../lib/store'
 import { SUGGESTIONS, searchClips } from '../lib/api'
 import type { Clip } from '../lib/api'
-import { timecode } from '../lib/format'
+import { humanDuration, timecode } from '../lib/format'
 import { Button, ButtonLink } from './ui/Button'
 import { Link } from '../lib/router'
 import { Card } from './ui/Card'
@@ -449,6 +450,14 @@ export function TrialDemo() {
               {video.framesTotal > 0
                 ? `${video.frames} of ${video.framesTotal} frames embedded`
                 : 'Probing the file…'}
+              {/* Live counter — the reassurance that something is happening
+                  even while the frame count sits at "Probing the file…". */}
+              {video.processingStartedAt && (
+                <>
+                  {' · '}
+                  <ProcessingTimer startedAt={video.processingStartedAt} />
+                </>
+              )}
             </span>
           </div>
           {video.framesTotal > 0 && (
@@ -487,6 +496,9 @@ export function TrialDemo() {
           {video.status === 'ready' ? (
             <span className="rounded-full border border-line bg-surface-soft px-2.5 py-1 text-[12px] font-medium text-ink-mid">
               Indexed
+              {/* Omitted for videos indexed before the server measured this. */}
+              {video.processingSeconds !== undefined &&
+                ` in ${humanDuration(video.processingSeconds)}`}
             </span>
           ) : (
             <span className="rounded-full border border-line bg-surface-soft px-2.5 py-1 text-[12px] font-medium text-ink-mid">

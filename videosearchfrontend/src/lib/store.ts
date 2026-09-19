@@ -106,6 +106,16 @@ export type VideoRecord = {
    * server-side regardless of whether the tab is open.
    */
   expiresAt?: string
+  /**
+   * How long the server spent indexing this video, in seconds.
+   *
+   * Undefined in two cases the UI must tell apart: indexing is still running
+   * (count up from `processingStartedAt` for a live timer), or the video was
+   * indexed before the server measured this at all (show nothing).
+   */
+  processingSeconds?: number
+  /** When indexing began — the anchor for the live timer while processing. */
+  processingStartedAt?: string
 }
 
 /** Backend `VideoOut` shape (snake_case) — mapped to `VideoRecord` below. */
@@ -126,6 +136,9 @@ type ApiVideo = {
   collection_ids?: string[]
   created_at: string
   expires_at?: string | null
+  processing_started_at?: string | null
+  processing_completed_at?: string | null
+  processing_seconds?: number | null
 }
 
 const objectUrls = new Map<string, string>()
@@ -195,6 +208,10 @@ function toRecord(video: ApiVideo): VideoRecord {
     createdAt: video.created_at,
     error: video.error ?? undefined,
     expiresAt: video.expires_at ?? undefined,
+    // An older backend omits these — undefined then means "never measured",
+    // which is exactly how the UI should read it.
+    processingSeconds: video.processing_seconds ?? undefined,
+    processingStartedAt: video.processing_started_at ?? undefined,
   }
 }
 

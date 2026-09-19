@@ -9,6 +9,7 @@ import { API_ENABLED } from '../lib/http'
 import { AppShell } from '../components/Shell'
 import { UploadDialog } from '../components/UploadDialog'
 import { ShareButton } from '../components/ShareButton'
+import { ProcessingTimer } from '../components/ProcessingTimer'
 import { SavedClips } from '../components/SavedClips'
 import { CollectionBar, CollectionMenu } from '../components/Collections'
 import {
@@ -271,6 +272,16 @@ export default function Dashboard() {
                         {compactNumber(video.frames)} frames ·{' '}
                         {fileSize(video.sizeBytes)} ·{' '}
                         {relativeTime(video.createdAt)}
+                        {/* Only once indexing has finished and the server
+                            actually measured it — older videos have no
+                            timing and simply omit this. */}
+                        {video.processingSeconds !== undefined && (
+                          <>
+                            {' '}
+                            · processed in{' '}
+                            {humanDuration(video.processingSeconds)}
+                          </>
+                        )}
                       </span>
                     </div>
 
@@ -287,6 +298,14 @@ export default function Dashboard() {
                       ) : (
                         <Chip tone="warn" pulse>
                           Processing
+                          {video.processingStartedAt && (
+                            <>
+                              {' '}
+                              <ProcessingTimer
+                                startedAt={video.processingStartedAt}
+                              />
+                            </>
+                          )}
                         </Chip>
                       )}
 

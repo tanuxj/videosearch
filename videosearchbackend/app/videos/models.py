@@ -149,6 +149,17 @@ class Video(Base, TimestampMixin):
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    # Indexing wall-clock, for the "processed in 2m 14s" line in the UI.
+    # `processing_started_at` is stamped when the pipeline picks the video up
+    # (not at upload — a queued job would make that a lie), and
+    # `processing_completed_at` when it reaches a terminal state, `ready` or
+    # `failed` alike. Both null for rows indexed before this was measured.
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    processing_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     frames: Mapped[list["Frame"]] = relationship(
         back_populates="video",
@@ -160,6 +171,19 @@ class Video(Base, TimestampMixin):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+    @property
+    def processing_seconds(self) -> float | None:
+        """Wall-clock seconds the pipeline spent on this video, once finished.
+
+        None while indexing is still running or when the row predates the
+        timing columns — the client shows a live counter in the first case
+        and nothing in the second, so the two must stay distinguishable
+        (which is why this does not fall back to "now minus start").
+        """
+        if self.processing_started_at is None or self.processing_completed_at is None:
+            return None
+        return (self.processing_completed_at - self.processing_started_at).total_seconds()
 
     def past_expiry(self) -> bool:
         """True when a trial deadline is set and has passed.

@@ -46,6 +46,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -847,6 +848,13 @@ async def index_video(
             if video is None or video.status != "processing":
                 return
 
+            # Committed on its own, before the probe: the probe is the first
+            # thing that can throw, and a video that failed still deserves a
+            # start time — the failure path below reads it to record how long
+            # the attempt ran.
+            video.processing_started_at = datetime.now(UTC)
+            await db.commit()
+
             if local_path is None or not local_path.exists():
                 local_path = await asyncio.to_thread(storage.get_local_path, video.storage_key)
                 owns_local_file = storage.backend == "r2"
@@ -869,6 +877,7 @@ async def index_video(
                 video.frames_total = 0
                 video.frames_indexed = 0
                 video.status = "ready"
+                video.processing_completed_at = datetime.now(UTC)
                 await db.commit()
                 # The uploader's bell rings: indexing is done (nothing to
                 # frame-index, but the video is searchable by transcript).
@@ -964,6 +973,7 @@ async def index_video(
             # indexed so a finished video always reads exactly 100%.
             video.frames_total = video.frames_indexed
             video.status = "ready"
+            video.processing_completed_at = datetime.now(UTC)
             await db.commit()
             # The uploader's bell rings: the video is now searchable. Written
             # after the ready commit on purpose — a failed notification must
@@ -996,6 +1006,9 @@ async def index_video(
                     await db.execute(delete(Frame).where(Frame.video_id == video.id))
                     video.status = "failed"
                     video.error = str(exc)[:500]
+                    # Stamped on failure too, so "it ran 4 minutes and died"
+                    # is visible rather than looking like it never started.
+                    video.processing_completed_at = datetime.now(UTC)
                     await db.commit()
         except Exception:  # pragma: no cover - best effort
             logger.exception("Could not mark video %s as failed", video_id)
