@@ -86,7 +86,18 @@ x-backend-env: &backend_env
   # validation and the migrate service aborts).
   EMBEDDING_MODEL: ${EMBEDDING_MODEL:-clip}
   CLIP_MODEL_NAME: ${CLIP_MODEL_NAME:-clip-ViT-B-32}
+  # SigLIP 2 checkpoint. patch32-256 is ~3x cheaper per frame than the
+  # patch16-224 default; the input resolution is parsed off this id, so
+  # nothing else needs changing. Switching it invalidates every stored
+  # embedding — re-index afterwards.
+  SIGLIP_MODEL_NAME: ${SIGLIP_MODEL_NAME:-google/siglip2-base-patch16-224}
   CLIP_BACKEND: ${CLIP_BACKEND:-onnx}
+  # CPU split between the decoder and the embedder — they run concurrently
+  # during indexing, so handing either one every core starves the other.
+  # EMBED_THREADS empty = cpu_count - 2 (see config.py); never set it to ''
+  # with a value in mind, an empty string is what "use the default" means here.
+  EMBED_THREADS: ${EMBED_THREADS:-}
+  DECODE_THREADS: ${DECODE_THREADS:-2}
   FLORENCE_MODEL_NAME: ${FLORENCE_MODEL_NAME:-microsoft/Florence-2-base}
   CAPTIONS_ENABLED: ${CAPTIONS_ENABLED:-false}
   GROUNDING_ENABLED: ${GROUNDING_ENABLED:-false}

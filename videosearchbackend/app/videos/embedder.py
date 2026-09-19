@@ -74,16 +74,33 @@ _vision_backend_failed = False
 MODEL_DIMS = {"clip": 512, "siglip2": 768}
 MODEL_IDS = {
     "clip": settings.clip_model_name,
-    "siglip2": "google/siglip2-base-patch16-224",
+    "siglip2": settings.siglip_model_name,
 }
 
-#: Vision input size of the configured model (both take 224px square).
-#: Defined after the constants above; the pipeline reads this.
-INPUT_SIZE = 224
+#: Vision input size of the configured model. CLIP ViT-B/32 is always 224;
+#: SigLIP 2's varies by checkpoint, so it is parsed off the configured id.
+#: Resolved at import because the model cannot change within a process — the
+#: pipeline builds its ffmpeg scale filter from this at import time too.
+INPUT_SIZE = settings.siglip_input_size if settings.embedding_model == "siglip2" else 224
 
 # Backwards-compatible alias — the pipeline used to import CLIP_INPUT_SIZE.
 CLIP_INPUT_SIZE = INPUT_SIZE
 _INPUT_SIZE = INPUT_SIZE
+
+# Per-model image normalisation, used only as a fallback: `_normalization`
+# reads these off the real processor when it can, so a model swap cannot
+# silently desync the numpy preprocessor from what the graph was traced on.
+# CLIP's are OpenAI's published values; SigLIP normalises to [-1, 1].
+_FALLBACK_NORMALIZATION = {
+    "clip": (
+        (0.48145466, 0.4578275, 0.40821073),
+        (0.26862954, 0.26130258, 0.27577711),
+    ),
+    "siglip2": ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+}
+
+# (mean, std) broadcast to (1, 3, 1, 1), resolved once on first use.
+_norm_cache: tuple[np.ndarray, np.ndarray] | None = None
 
 
 def _ensure_model() -> Any:
@@ -150,18 +167,19 @@ def load() -> Any:
 
 
 def to_clip_frame(frame: np.ndarray) -> np.ndarray:
-    """Downscale an RGB frame to CLIP's 224x224 input.
+    """Downscale an RGB frame to the model's square input (`INPUT_SIZE`).
 
-    Mirrors CLIP's own preprocessing — resize the shortest edge to 224, then
-    centre-crop — so the resulting vectors stay interchangeable with ones
-    produced from full-resolution frames. A frame that is already 224x224 (the
-    indexing pipeline's decoder emits them that way) passes through untouched.
+    Mirrors the processors' own preprocessing — resize the shortest edge to
+    the input size, then centre-crop — so the resulting vectors stay
+    interchangeable with ones produced from full-resolution frames. A frame
+    that is already at that size (the indexing pipeline's decoder emits them
+    that way) passes through untouched.
     """
     height, width = frame.shape[:2]
     if height == _INPUT_SIZE and width == _INPUT_SIZE:
         return frame
     scale = _INPUT_SIZE / min(height, width)
-    # `round` (not floor) so the short edge never lands a pixel under 224.
+    # `round` (not floor) so the short edge never lands a pixel short.
     resized = cv2.resize(
         frame,
         (max(_INPUT_SIZE, round(width * scale)), max(_INPUT_SIZE, round(height * scale))),
@@ -177,6 +195,55 @@ def to_clip_frame(frame: np.ndarray) -> np.ndarray:
 def _to_clip_input(frame: np.ndarray) -> Image.Image:
     """`to_clip_frame`, wrapped as the PIL Image the CLIP module requires."""
     return Image.fromarray(to_clip_frame(frame))
+
+
+def _image_stats(processor: Any) -> tuple[tuple, tuple]:
+    """(image_mean, image_std) off a processor, whatever shape it comes in.
+
+    `AutoProcessor` for SigLIP exposes them directly; CLIPProcessor keeps them
+    on its nested `image_processor`. Falls back to the per-model constants
+    when neither has them (a stand-in processor in tests, say).
+    """
+    for candidate in (processor, getattr(processor, "image_processor", None)):
+        mean = getattr(candidate, "image_mean", None)
+        std = getattr(candidate, "image_std", None)
+        if mean is not None and std is not None:
+            return tuple(mean), tuple(std)
+    return _FALLBACK_NORMALIZATION[settings.embedding_model]
+
+
+def _normalization() -> tuple[np.ndarray, np.ndarray]:
+    """Mean and std shaped (1, 3, 1, 1), ready to broadcast over a batch."""
+    global _norm_cache
+    if _norm_cache is None:
+        mean, std = _image_stats(_get_processor())
+        _norm_cache = (
+            np.asarray(mean, dtype=np.float32).reshape(1, 3, 1, 1),
+            np.asarray(std, dtype=np.float32).reshape(1, 3, 1, 1),
+        )
+    return _norm_cache
+
+
+def _preprocess(frames: list[np.ndarray]) -> np.ndarray:
+    """RGB uint8 frames → the (batch, 3, S, S) float32 tensor the graph takes.
+
+    This is what the HF processor does — resize/crop to the input size,
+    rescale by 1/255, normalise — done in numpy over the whole batch instead
+    of per frame through PIL. The indexing pipeline's decoder already emits
+    frames at exactly the input size, so `to_clip_frame` is a no-op there and
+    every PIL Image built on that path was pure overhead: an object per frame,
+    a resize that changed nothing, and a second pass to get back to an array.
+    Frames that *are* off-size (the torch fallback's callers, grounding) still
+    go through the same scale-and-centre-crop, so the vectors are unchanged.
+    """
+    mean, std = _normalization()
+    # (N, S, S, 3) uint8 → (N, 3, S, S) float32, contiguous for onnxruntime.
+    stacked = np.stack([to_clip_frame(frame) for frame in frames])
+    pixels = np.ascontiguousarray(stacked.transpose(0, 3, 1, 2), dtype=np.float32)
+    pixels /= 255.0
+    pixels -= mean
+    pixels /= std
+    return pixels
 
 
 def _get_processor() -> Any:
@@ -212,9 +279,12 @@ def _onnx_dir() -> Path:
     model weights and never needs re-exporting.
     """
     base = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
-    # Keyed by the configured embedding model so switching models never
-    # reuses (or clobbers) the other one's exported graph.
-    return base / "onnx" / settings.embedding_model
+    # Keyed by the *checkpoint*, not the model family: two SigLIP 2
+    # checkpoints are both `embedding_model="siglip2"` but have different
+    # input resolutions and weights, and keying on the family name would hand
+    # a patch32-256 run the patch16-224 graph exported before it. Slashes in
+    # the id become a nested path, which is what HF ids look like anyway.
+    return base / "onnx" / MODEL_IDS[settings.embedding_model].replace("/", "--")
 
 
 def _export_vision_onnx(destination: Path) -> None:
@@ -253,7 +323,7 @@ def _export_vision_onnx(destination: Path) -> None:
     projector = _VisionProjector(clip).eval()
 
     # A representative input to trace against — the processor output is
-    # (batch, 3, 224, 224), and the graph accepts any batch size.
+    # (batch, 3, INPUT_SIZE, INPUT_SIZE), and the graph accepts any batch size.
     sample = torch.zeros(1, 3, _INPUT_SIZE, _INPUT_SIZE)
     destination.parent.mkdir(parents=True, exist_ok=True)
     # Per-process tmp name: with several uvicorn workers, two processes may
@@ -320,7 +390,8 @@ def _get_vision_session() -> Any | None:
 
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        options.intra_op_num_threads = os.cpu_count() or 4
+        # Not every core: the decoder needs some, and they run concurrently.
+        options.intra_op_num_threads = settings.resolved_embed_threads
         options.inter_op_num_threads = 1
         try:
             _vision_session = ort.InferenceSession(
@@ -348,18 +419,15 @@ def prewarm() -> None:
 def embed_images(images: list) -> list[list[float]]:
     """Embed a batch of decoded frames (RGB numpy arrays) into unit vectors.
 
-    Frames are downscaled to the model's input size and converted to PIL
-    Images first — the processors' tokenizers only route PIL.Image instances
-    to the vision tower; numpy arrays would be misread as text.
-    Preprocessing (normalisation) runs through the same processor in both
-    paths, so ONNX and torch vectors are identical.
+    The ONNX path preprocesses in numpy (`_preprocess`) — same resize, rescale
+    and normalisation the processor applies, over the whole batch at once.
+    The torch paths still build PIL Images, because the processors' tokenizers
+    only route PIL.Image instances to the vision tower and would misread a
+    numpy array as text. Both produce the same vectors.
     """
-    pil_images = [_to_clip_input(frame) for frame in images]
     session = _get_vision_session()
     if session is not None:
-        processor = _get_processor()
-        batch = processor(images=pil_images, return_tensors="pt")
-        pixels = batch["pixel_values"].numpy()
+        pixels = _preprocess(images)
         # Unlocked on purpose: `InferenceSession.run` is thread-safe, and the
         # indexing pipeline calls this from its own embed thread.
         vectors = session.run(None, {"pixel_values": pixels})[0]
@@ -380,7 +448,9 @@ def embed_images(images: list) -> list[list[float]]:
 
         model = _ensure_model()
         processor = _get_processor()
-        batch = processor(images=pil_images, return_tensors="pt")
+        batch = processor(
+            images=[_to_clip_input(frame) for frame in images], return_tensors="pt"
+        )
         with _lock, torch.no_grad():
             outputs = model.vision_model(**batch)
             vectors = torch.nn.functional.normalize(outputs.pooler_output, p=2, dim=1)
@@ -389,7 +459,7 @@ def embed_images(images: list) -> list[list[float]]:
     model = load()
     with _lock:
         vectors = model.encode(
-            pil_images,
+            [_to_clip_input(frame) for frame in images],
             convert_to_numpy=True,
             normalize_embeddings=True,
             show_progress_bar=False,

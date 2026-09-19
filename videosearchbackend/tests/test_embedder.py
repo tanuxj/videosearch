@@ -20,11 +20,13 @@ def _reset_caches():
     embedder._processor = None
     embedder._vision_session = None
     embedder._vision_backend_failed = False
+    embedder._norm_cache = None
     yield
     embedder._model = None
     embedder._processor = None
     embedder._vision_session = None
     embedder._vision_backend_failed = False
+    embedder._norm_cache = None
 
 
 class _FakeProcessor:
@@ -170,3 +172,98 @@ def test_prewarm_loads_session_and_model(monkeypatch: pytest.MonkeyPatch) -> Non
 
     # Both paths were touched without error — nothing to assert beyond no raise.
     assert embedder._get_vision_session() is not None
+
+
+# ── numpy preprocessing ───────────────────────────────────────────────────
+#
+# The ONNX path stopped routing frames through PIL + the HF processor and
+# normalises them in numpy instead. These are the tests that keep the two
+# equivalent: the processors below are real ones (they instantiate offline —
+# they are config objects, not weights), so a drift in either direction fails
+# here rather than silently shifting every vector in the index.
+
+
+def _processor_pixels(processor, frames: list) -> np.ndarray:
+    """The reference tensor: frames through PIL and the real HF processor."""
+    from PIL import Image
+
+    images = [Image.fromarray(frame) for frame in frames]
+    return processor(images=images, return_tensors="np")["pixel_values"]
+
+
+@pytest.mark.parametrize(
+    ("model_name", "processor_factory"),
+    [
+        ("clip", lambda: __import__("transformers").CLIPImageProcessor()),
+        ("siglip2", lambda: __import__("transformers").SiglipImageProcessor()),
+    ],
+)
+def test_preprocess_matches_hf_processor(
+    monkeypatch: pytest.MonkeyPatch, model_name: str, processor_factory
+) -> None:
+    """numpy preprocessing reproduces the processor's tensor, within float noise."""
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "embedding_model", model_name)
+    processor = processor_factory()
+    monkeypatch.setattr(embedder, "_get_processor", lambda: processor)
+
+    rng = np.random.default_rng(0)
+    # Already at the model's input size — the indexing pipeline's decoder
+    # emits frames this way, which is the case the fast path exists for.
+    frames = [
+        rng.integers(0, 256, (embedder.INPUT_SIZE, embedder.INPUT_SIZE, 3), dtype=np.uint8)
+        for _ in range(3)
+    ]
+
+    ours = embedder._preprocess(frames)
+    theirs = _processor_pixels(processor, frames)
+
+    assert ours.shape == theirs.shape == (3, 3, embedder.INPUT_SIZE, embedder.INPUT_SIZE)
+    assert ours.dtype == np.float32
+    assert np.allclose(ours, theirs, atol=1e-5)
+
+
+def test_preprocess_resizes_off_size_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A frame that is not already square input-size still lands at the right shape."""
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "embedding_model", "clip")
+    monkeypatch.setattr(embedder, "_get_processor", lambda: _FakeProcessor(1))
+
+    frames = [np.zeros((480, 640, 3), dtype=np.uint8)]
+    pixels = embedder._preprocess(frames)
+
+    assert pixels.shape == (1, 3, embedder.INPUT_SIZE, embedder.INPUT_SIZE)
+
+
+def test_image_stats_falls_back_when_processor_has_none() -> None:
+    """A processor without mean/std yields the configured model's constants."""
+    from app.core.config import get_settings
+
+    mean, std = embedder._image_stats(_FakeProcessor(1))
+    assert (mean, std) == embedder._FALLBACK_NORMALIZATION[get_settings().embedding_model]
+
+
+def test_onnx_path_never_calls_the_processor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole point of the change: no PIL, no processor call, on the hot path."""
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "clip_backend", "onnx")
+    monkeypatch.setattr(embedder, "_ensure_model", lambda: _FakeModel(batch=3))
+    monkeypatch.setattr(embedder, "_get_vision_session", lambda: _FakeSession(batch=3))
+
+    called = {"n": 0}
+
+    class _CountingProcessor(_FakeProcessor):
+        def __call__(self, *args, **kwargs):
+            called["n"] += 1
+            return super().__call__(*args, **kwargs)
+
+    monkeypatch.setattr(embedder, "_get_processor", lambda: _CountingProcessor(3))
+
+    vecs = embedder.embed_images(_fake_frames())
+
+    assert len(vecs) == 3
+    # `_normalization` may read mean/std off it, but it is never *invoked*.
+    assert called["n"] == 0

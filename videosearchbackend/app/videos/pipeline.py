@@ -264,8 +264,16 @@ def _sampler_args(
     frames up to a constant rate, which would break the one-line-per-frame
     pairing with `showinfo`. It is spelled the old way on purpose —
     ``-fps_mode`` only exists from ffmpeg 5.1, and a system ffmpeg can be older.
+
+    ``-threads`` is capped at ``decode_threads`` so the decoder and the
+    embedder share the box instead of each claiming every core.
     """
     args = [ffmpeg_binary(), "-hide_banner", "-loglevel", "info"]
+    # Capped, not left to ffmpeg's "one thread per core" default: decoding and
+    # embedding run concurrently (see `_process_video`), so an unbounded
+    # decoder takes cores straight off the embedder — which is the half of the
+    # job that is actually the bottleneck. Before `-i`: this is a decode option.
+    args += ["-threads", str(settings.decode_threads)]
     if keyframes_only:
         # Decoder-level: non-keyframes are discarded before being decoded.
         args += ["-skip_frame", "nokey"]

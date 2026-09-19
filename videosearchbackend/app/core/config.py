@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -223,10 +224,29 @@ class Settings(BaseSettings):
     # Model id used when `embedding_model` is "clip" (kept for backwards
     # compatibility with existing deployments' CLIP_MODEL_NAME overrides).
     clip_model_name: str = "clip-ViT-B-32"
+    # Model id used when `embedding_model` is "siglip2". Configurable because
+    # the SigLIP 2 family trades accuracy against cost purely through patch
+    # size and input resolution — `siglip2-base-patch32-256` is ~3x cheaper per
+    # frame than the patch16-224 default, which is the cheapest large win
+    # available on CPU. The input resolution is parsed off the id (see
+    # `siglip_input_size`), so the two can never disagree.
+    #
+    # Changing this changes the embedding space: re-index every video after.
+    siglip_model_name: str = "google/siglip2-base-patch16-224"
     # "onnx" runs the vision tower through onnxruntime (~1.4x faster on
     # CPU, identical vectors, lighter load); "torch" keeps the classic eager
     # path. Falls back to torch automatically if the export fails.
     clip_backend: Literal["onnx", "torch"] = "onnx"
+    # CPU threads the ONNX vision session may use. Indexing decodes and embeds
+    # at the same time (see pipeline.py), so handing the embedder every core
+    # makes the two halves of the same job fight for the same CPUs — the
+    # decoder stalls, the queue drains, and the embedder waits on it anyway.
+    # None resolves to `cpu_count - 2`, leaving room for `decode_threads`.
+    embed_threads: int | None = Field(default=None, ge=1, le=256)
+    # `-threads` handed to the sampling ffmpeg processes. Frame decode stops
+    # scaling after a few threads, and every core it does not take is one the
+    # embedder gets.
+    decode_threads: int = Field(default=2, ge=1, le=64)
     # Load CLIP at startup on a background thread rather than on the first
     # upload/search. Tests turn this off so they don't pull ~1.2 GB of weights.
     prewarm_clip_model: bool = True
@@ -416,12 +436,13 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
-    @field_validator("search_min_similarity", mode="before")
+    @field_validator("search_min_similarity", "embed_threads", mode="before")
     @classmethod
-    def _blank_min_similarity_is_unset(cls, value: object) -> object:
+    def _blank_is_unset(cls, value: object) -> object:
         # docker-compose's ${VAR:-} passes an empty string through when the
-        # variable is unset; that means "use the per-model default", not a
-        # float-parsing error.
+        # variable is unset; for these fields that means "use the default the
+        # None case resolves to", not a number-parsing error. Both are
+        # optional-with-a-computed-default, so they share this.
         if isinstance(value, str) and not value.strip():
             return None
         return value
@@ -502,6 +523,35 @@ class Settings(BaseSettings):
     @property
     def refresh_token_ttl_seconds(self) -> int:
         return self.refresh_token_ttl_days * 24 * 60 * 60
+
+    @property
+    def siglip_input_size(self) -> int:
+        """Vision input resolution parsed off `siglip_model_name`.
+
+        Google's SigLIP 2 ids end in their resolution
+        (`siglip2-base-patch16-224`, `…-patch32-256`, `…-patch16-384`), and
+        that number has to reach both the ONNX export and the ffmpeg scale
+        filter that feeds it. Parsing it from the one place the checkpoint is
+        named is what stops those two from drifting apart — a separate
+        setting could be left at 224 while the model moved to 256, and the
+        only symptom would be a shape error deep in onnxruntime.
+
+        Falls back to 224 (every current `-base` checkpoint's default) when
+        the id does not carry a trailing resolution.
+        """
+        tail = self.siglip_model_name.rsplit("-", 1)[-1]
+        return int(tail) if tail.isdigit() else 224
+
+    @property
+    def resolved_embed_threads(self) -> int:
+        """`embed_threads`, or a budget that leaves the decoder some cores.
+
+        Two below the core count, floored at 1 — so a 2-core box still runs
+        (both sides just share) and an 8-core box gives the embedder 6.
+        """
+        if self.embed_threads is not None:
+            return self.embed_threads
+        return max(1, (os.cpu_count() or 4) - 2)
 
     @property
     def search_min_similarity_effective(self) -> float:
