@@ -309,13 +309,20 @@ def _ffmpeg_samples(args: list[str], *, offset: float = 0.0) -> Iterator[tuple[f
 
     def drain() -> None:
         try:
-            for line in iter(proc.stderr.readline, b""):
-                text = line.decode("utf-8", "replace").strip()
-                match = _PTS_TIME.search(text)
-                if match is not None:
-                    timestamps.put(float(match.group(1)))
-                elif text:
-                    complaints.append(text)
+            try:
+                for line in iter(proc.stderr.readline, b""):
+                    text = line.decode("utf-8", "replace").strip()
+                    match = _PTS_TIME.search(text)
+                    if match is not None:
+                        timestamps.put(float(match.group(1)))
+                    elif text:
+                        complaints.append(text)
+            except ValueError:
+                # The generator's finally closes stderr while this thread may
+                # still be blocked inside readline() — that race surfaces here
+                # as "I/O operation on closed file" and means end-of-stream
+                # just the same. The sentinel below is what matters.
+                pass
         finally:
             # Sentinel: stderr closed, so no further timestamp is coming.
             timestamps.put(None)
